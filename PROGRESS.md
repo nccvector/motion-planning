@@ -407,6 +407,24 @@
   - `./build/ur5_path_diagnose build/scenes/ur5e_clutter.xml planned_path.csv 128`
     found 0 contacts, 0 negative robot-ring distances, and closest red-ring
     distance `0.015159 m`.
+- Changed the shared realtime execution loop back to 60 Hz:
+  - execution timestep is `1/60 s`,
+  - each control tick computes the trajectory target, applies one PID/servo
+    update, advances MuJoCo once, and sleeps remaining wall time in realtime
+    mode.
+- Verified after restoring 60 Hz execution:
+  - `cmake --build build --target ur5_clutter_plan ur5_goal_loop_demo`,
+  - `./build/ur5_goal_loop_demo --check-goals`,
+  - `./build/ur5_clutter_plan --no-live`,
+  - `MuJoCo timestep: 0.0166667 s`,
+  - PID execution steps: `301`,
+  - PID simulated time: `5.01667 s`,
+  - PID final max joint error: `0.0187608 rad`,
+  - PID obstacle-contact steps: `0`,
+  - `./build/ur5_path_replay --check build/scenes/ur5e_clutter.xml executed_trace.csv`,
+  - `./build/ur5_path_diagnose build/scenes/ur5e_clutter.xml planned_path.csv 128`
+    found 0 contacts, 0 negative robot-ring distances, and closest red-ring
+    distance `0.015159 m`.
 
 ## Next
 

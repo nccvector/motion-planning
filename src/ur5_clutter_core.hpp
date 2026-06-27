@@ -58,7 +58,7 @@ constexpr double kMinimumExecutionDurationSeconds = 4.0;
 constexpr double kFinalHoldSeconds = 1.0;
 constexpr int kExecutionTraceStride = 16;
 constexpr double kLiveRenderHz = 60.0;
-constexpr double kControlHz = 90.0;
+constexpr double kControlHz = 60.0;
 constexpr double kControlPeriodSeconds = 1.0 / kControlHz;
 
 using JointArray = std::array<double, kDof>;
