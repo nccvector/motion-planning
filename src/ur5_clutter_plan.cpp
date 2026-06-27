@@ -3,6 +3,7 @@
 #include <ompl/base/spaces/RealVectorBounds.h>
 #include <ompl/base/spaces/RealVectorStateSpace.h>
 #include <ompl/geometric/PathGeometric.h>
+#include <ompl/geometric/PathSimplifier.h>
 #include <ompl/geometric/SimpleSetup.h>
 #include <ompl/geometric/planners/rrt/RRTConnect.h>
 
@@ -419,6 +420,19 @@ double MaxAbs(const JointArray& values) {
   return result;
 }
 
+int PathClearanceViolationCount(Ur5Scene& scene,
+                                const og::PathGeometric& path,
+                                double required_clearance) {
+  int violations = 0;
+  for (std::size_t i = 0; i < path.getStateCount(); ++i) {
+    scene.SetConfiguration(StateToJoints(path.getState(i)));
+    if (scene.ObstacleClearanceViolationCount(required_clearance) > 0) {
+      ++violations;
+    }
+  }
+  return violations;
+}
+
 void PrintPose(const std::string& label, Ur5Scene& scene, const JointArray& q) {
   scene.SetConfiguration(q);
   const auto tool = scene.ToolPosition();
@@ -535,9 +549,22 @@ std::vector<JointArray> PlanPath(Ur5Scene& scene,
 
   og::PathGeometric path = setup.getSolutionPath();
   const std::size_t simplified_state_count = path.getStateCount();
+  og::PathGeometric bspline_path(path);
+  setup.getPathSimplifier()->smoothBSpline(bspline_path, 5, bspline_path.length() / 100.0);
+  const std::size_t bspline_state_count = bspline_path.getStateCount();
+  const int bspline_planning_clearance_violations =
+      PathClearanceViolationCount(scene, bspline_path, kPlanningObstacleClearance);
+  const bool using_bspline = bspline_planning_clearance_violations == 0;
+  if (using_bspline) {
+    path = bspline_path;
+  }
   path.interpolate(240);
   std::cout << "OMPL raw path states: " << raw_state_count << '\n';
   std::cout << "OMPL simplified path states: " << simplified_state_count << '\n';
+  std::cout << "OMPL B-spline-smoothed path states: " << bspline_state_count << '\n';
+  std::cout << "OMPL B-spline planning-clearance violation states: "
+            << bspline_planning_clearance_violations << '\n';
+  std::cout << "OMPL using B-spline-smoothed path: " << std::boolalpha << using_bspline << '\n';
 
   std::vector<JointArray> result;
   result.reserve(path.getStateCount());

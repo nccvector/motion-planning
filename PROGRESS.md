@@ -127,6 +127,24 @@
     `0.026301 m`,
   - executed trace: 0 contacts, 0 negative distances, closest red-ring distance
     `0.028734 m`.
+- Tried explicit OMPL B-spline smoothing after shortcut simplification:
+  - initial unconditional B-spline smoothing produced a planned path that passed
+    1 cm validation but caused execution obstacle contacts, showing it consumed
+    too much controller safety cushion,
+  - updated `ur5_clutter_plan` to smooth a copy, check the smoothed copy against
+    the 2.5 cm planning clearance, and fall back to the shortcut-simplified path
+    if the B-spline path loses that cushion,
+  - planner now reports B-spline state count, B-spline planning-clearance
+    violation count, and whether the B-spline path was used.
+- Verified 6 successful `./build/ur5_clutter_plan` runs after guarded B-spline:
+  - all used B-spline in the observed runs,
+  - all had 0 planned clearance violations and 0 PID clearance-violation steps,
+  - observed max waypoint tracking error range was `0.020-0.040 rad`.
+- Latest dense red-ring diagnostics after guarded B-spline:
+  - planned path: 0 contacts, 0 negative distances, closest red-ring distance
+    `0.024841 m`,
+  - executed trace: 0 contacts, 0 negative distances, closest red-ring distance
+    `0.020901 m`.
 
 ## Next
 
