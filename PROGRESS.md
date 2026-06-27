@@ -307,11 +307,31 @@
   - added `src/ur5_visualization.hpp` for shared camera defaults, mesh/collision
     group toggling, tool-path markers, and mouse drag/scroll camera callbacks,
   - both `ur5_clutter_plan` and `ur5_path_replay` now use the same viewer helper.
+- Added an endless goal-loop demo:
+  - split the reusable UR5 scene/planner/PID helpers into
+    `src/ur5_clutter_core.hpp`,
+  - kept `ur5_clutter_plan.cpp` as the one-shot CLI entrypoint,
+  - added `src/ur5_goal_loop_demo.cpp` and the `ur5_goal_loop_demo` target,
+  - the loop demo starts at the first joint-space goal, opens the viewer
+    immediately, plans the next segment on a separate planning scene/thread, and
+    executes the accepted path on the visible scene,
+  - each segment retries planning up to 4 times and stops with exact start/goal
+    joint vectors if retries are exhausted,
+  - the loop demo does not write CSV traces for long-running sessions,
+  - the overlay reports planning progress, retry attempt, selected path kind,
+    planning time, OMPL solve attempts, spline repair iterations, and PID
+    execution progress.
+- Verified after the loop-demo split:
+  - `cmake --build build --target ur5_clutter_plan ur5_goal_loop_demo`,
+  - `./build/ur5_goal_loop_demo --help`,
+  - `./build/ur5_clutter_plan --no-live`.
 
 ## Next
 
 - Run `./build/ur5_clutter_plan` normally to see live PID execution immediately
   after planning.
+- Run `./build/ur5_goal_loop_demo` to watch the endless goal-to-goal realtime
+  planning/execution loop.
 - Use `./build/ur5_clutter_plan --no-live` for repeated planner/debug batches.
 - Use `./build/ur5_clutter_plan --live-fast` when you want an unpaced fast
   preview instead of realtime playback.

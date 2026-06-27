@@ -30,6 +30,13 @@ This project is intentionally separate from `projects/ros2-learning`.
   - loads the same MuJoCo scene,
   - replays `planned_path.csv` or `executed_trace.csv`,
   - shows the tool path and current tool position in a native MuJoCo/GLFW window.
+- A C++23 executable, `ur5_goal_loop_demo`, that:
+  - cycles through a small list of valid joint-space goals,
+  - plans each next segment on a separate planning scene/thread while the viewer
+    stays responsive,
+  - retries failed planning segments up to 4 times,
+  - executes each accepted segment with the same PID controller without writing
+    long-running CSV traces.
 - A C++23 executable, `ur5_path_diagnose`, that:
   - checks robot collision geometry against the red ring along a saved CSV path,
   - samples between adjacent CSV rows to catch interpolation/grazing issues.
@@ -72,6 +79,21 @@ that does not sleep to realtime:
 ```bash
 ./build/ur5_clutter_plan --live-fast
 ```
+
+Endless goal-loop demo:
+
+```bash
+./build/ur5_goal_loop_demo
+```
+
+This opens the viewer immediately at the first loop goal, plans to the next
+goal on a separate planning scene/thread, and then executes the result with the
+PID controller on the visible scene. It does not write CSV files. The overlay
+shows planning progress, retry attempt, selected path kind (`C2 spline smoothed
+path` or linear fallback), planning time, OMPL solve attempts, spline repair
+iterations, and PID execution progress. If all 4 planning retries fail for a
+segment, the program stops and prints the exact start/goal joint vectors for
+reproducing that pair in a smaller experiment.
 
 The planner rejects actual obstacle contacts. OMPL state validity and final path
 acceptance use a 1.5 cm clearance margin between robot collision geometry and
