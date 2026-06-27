@@ -222,10 +222,56 @@
   - `./build/ur5_path_replay --check build/scenes/ur5e_clutter.xml executed_trace.csv`
     loaded the generated 459657-frame execution trace successfully.
 - Changed the interactive replay default speed from `0.45x` to realtime `1.0x`.
+- Root-caused the intermittent
+  `No fallback linear path preserved ring passage and hard clearance` failure:
+  - the failing run was an OMPL `RRTConnect` approximate solution at the edge of
+    the 500 ms budget,
+  - approximate OMPL solutions can be partial paths that do not reach the
+    shelf-side goal,
+  - sending that partial path into spline/fallback validation made the fallback
+    check fail with a misleading ring/hard-clearance message.
+- Updated `ur5_clutter_plan` so approximate OMPL solutions are rejected before
+  smoothing/fallback:
+  - OMPL solves in bounded attempts inside the same 500 ms budget,
+  - approximate attempts clear planner state and retry while budget remains,
+  - only exact start-to-goal solutions enter shortcutting, spline repair, or
+    linear fallback,
+  - the fallback exception now reports raw/shortcut ring and hard-clearance
+    details if it ever occurs on an exact solution.
+- Added live PID execution viewing directly to `ur5_clutter_plan`:
+  - default `./build/ur5_clutter_plan` opens a MuJoCo window after the final path
+    is planned,
+  - the window displays the actual PID-driven `mjData` state, not a CSV replay,
+  - `C` toggles mesh/collision view and `Esc` closes the live viewer,
+  - `--no-live` keeps batch/debug runs non-interactive while still writing
+    `planned_path.csv` and `executed_trace.csv`.
+- Verified with `cmake --build build --target ur5_clutter_plan`.
+- Verified 10 consecutive non-interactive runs with
+  `./build/ur5_clutter_plan --no-live`:
+  - run 1 reproduced the old approximate-solution condition, rejected it, retried,
+    and succeeded on attempt 2,
+  - all 10 runs exited successfully,
+  - no run produced the old fallback exception,
+  - all final planned paths had 0 hard-clearance violations and nonzero
+    ring-opening samples.
+- Latest final smoke after the live-viewer patch:
+  - `./build/ur5_clutter_plan --no-live` exited successfully,
+  - planning wall time: `103.737 ms`,
+  - planner fallback: `raw OMPL linear`,
+  - final planned path hard-clearance violation states: `0`,
+  - PID obstacle-contact steps: `0`,
+  - PID clearance-violation steps: `0`.
+- Latest dense planned-path diagnostic:
+  - `./build/ur5_path_diagnose build/scenes/ur5e_clutter.xml planned_path.csv 128`
+    found 0 contacts, 0 negative robot-ring distances, closest red-ring distance
+    `0.019222 m`,
+  - `./build/ur5_path_replay --check build/scenes/ur5e_clutter.xml planned_path.csv`
+    loaded 480 frames successfully.
 
 ## Next
 
-- Open the interactive replay window with `./build/ur5_path_replay` and press
-  `C` to switch between robot mesh view and collision-geometry view.
+- Run `./build/ur5_clutter_plan` normally to see live PID execution immediately
+  after planning.
+- Use `./build/ur5_clutter_plan --no-live` for repeated planner/debug batches.
 - Use `./build/ur5_path_diagnose build/scenes/ur5e_clutter.xml planned_path.csv 128`
   when a visual pass looks suspicious; trust this over eyeballing perspective.

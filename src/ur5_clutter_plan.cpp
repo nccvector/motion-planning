@@ -1,3 +1,4 @@
+#include <GLFW/glfw3.h>
 #include <mujoco/mujoco.h>
 #include <ompl/base/ScopedState.h>
 #include <ompl/base/spaces/RealVectorBounds.h>
@@ -16,9 +17,12 @@
 #include <iostream>
 #include <memory>
 #include <optional>
+#include <sstream>
 #include <stdexcept>
 #include <string>
 #include <string_view>
+#include <thread>
+#include <utility>
 #include <vector>
 
 namespace ob = ompl::base;
@@ -38,6 +42,8 @@ constexpr double kOmplObstacleClearance = 0.015;
 constexpr double kPlanningObstacleClearance = 0.015;
 constexpr std::size_t kInterpolatedPathStates = 480;
 constexpr double kPlanningTimeBudgetSeconds = 0.500;
+constexpr double kMaxOmplSolveAttemptSeconds = 0.180;
+constexpr double kMinOmplSolveAttemptSeconds = 0.020;
 constexpr int kMaxC2RepairIterations = 8;
 constexpr std::size_t kMaxC2SplineKnots = 96;
 constexpr double kMinimumSplineAttemptBudgetSeconds = 0.080;
@@ -409,6 +415,177 @@ class Ur5Scene {
   ActuatorMode actuator_mode_ = ActuatorMode::kTorque;
   std::vector<int> robot_collision_geoms_;
   std::vector<int> obstacle_geoms_;
+};
+
+std::vector<std::array<double, 3>> ComputeToolPath(Ur5Scene& scene,
+                                                   const std::vector<JointArray>& path) {
+  std::vector<std::array<double, 3>> tool_path;
+  tool_path.reserve(path.size());
+  for (const JointArray& q : path) {
+    scene.SetConfiguration(q);
+    tool_path.push_back(scene.ToolPosition());
+  }
+  return tool_path;
+}
+
+class LivePidViewer {
+ public:
+  LivePidViewer(Ur5Scene& scene,
+                std::vector<std::array<double, 3>> planned_tool_path,
+                bool enabled)
+      : scene_(scene), planned_tool_path_(std::move(planned_tool_path)) {
+    if (!enabled) {
+      return;
+    }
+    if (!glfwInit()) {
+      std::cerr << "warning: live PID viewer disabled because GLFW could not initialize\n";
+      return;
+    }
+
+    window_ = glfwCreateWindow(1280, 900, "UR5e live PID execution", nullptr, nullptr);
+    if (window_ == nullptr) {
+      std::cerr << "warning: live PID viewer disabled because GLFW could not create a window\n";
+      glfwTerminate();
+      return;
+    }
+
+    glfwMakeContextCurrent(window_);
+    glfwSwapInterval(1);
+
+    mjv_defaultCamera(&camera_);
+    mjv_defaultOption(&option_);
+    ApplyRobotGeometryMode();
+    mjv_defaultScene(&mjv_scene_);
+    mjr_defaultContext(&context_);
+
+    mjv_defaultFreeCamera(scene_.model(), &camera_);
+    camera_.distance = 1.8;
+    camera_.azimuth = 145.0;
+    camera_.elevation = -25.0;
+    camera_.lookat[0] = -0.25;
+    camera_.lookat[1] = 0.05;
+    camera_.lookat[2] = 0.30;
+
+    mjv_makeScene(scene_.model(), &mjv_scene_, 4000);
+    mjr_makeContext(scene_.model(), &context_, mjFONTSCALE_150);
+    start_wall_time_ = Clock::now();
+    active_ = true;
+  }
+
+  ~LivePidViewer() {
+    if (!active_) {
+      return;
+    }
+    mjv_freeScene(&mjv_scene_);
+    mjr_freeContext(&context_);
+    glfwDestroyWindow(window_);
+    glfwTerminate();
+  }
+
+  bool active() const { return active_ && window_ != nullptr && !glfwWindowShouldClose(window_); }
+
+  void Pace(double simulation_time) const {
+    if (!active()) {
+      return;
+    }
+    const auto target_time =
+        start_wall_time_ +
+        std::chrono::duration_cast<Clock::duration>(std::chrono::duration<double>(simulation_time));
+    const auto now = Clock::now();
+    if (target_time > now) {
+      std::this_thread::sleep_until(target_time);
+    }
+  }
+
+  void Render(std::size_t target_index, int step) {
+    if (!active()) {
+      return;
+    }
+    if (glfwGetKey(window_, GLFW_KEY_ESCAPE) == GLFW_PRESS) {
+      glfwSetWindowShouldClose(window_, GLFW_TRUE);
+      return;
+    }
+    const bool c_down = glfwGetKey(window_, GLFW_KEY_C) == GLFW_PRESS;
+    if (c_down && !c_was_down_) {
+      show_collision_model_ = !show_collision_model_;
+    }
+    c_was_down_ = c_down;
+
+    mjrRect viewport = {0, 0, 0, 0};
+    glfwGetFramebufferSize(window_, &viewport.width, &viewport.height);
+    ApplyRobotGeometryMode();
+    mjv_updateScene(scene_.model(), scene_.data(), &option_, nullptr, &camera_, mjCAT_ALL,
+                    &mjv_scene_);
+    AddToolPathMarkers(target_index);
+    mjr_render(viewport, &mjv_scene_, &context_);
+    RenderOverlay(viewport, target_index, step);
+    glfwSwapBuffers(window_);
+    glfwPollEvents();
+  }
+
+ private:
+  using Clock = std::chrono::steady_clock;
+
+  void ApplyRobotGeometryMode() {
+    constexpr int kRobotVisualGroup = 2;
+    constexpr int kRobotCollisionGroup = 3;
+    option_.geomgroup[kRobotVisualGroup] = show_collision_model_ ? 0 : 1;
+    option_.geomgroup[kRobotCollisionGroup] = show_collision_model_ ? 1 : 0;
+  }
+
+  void AddToolPathMarkers(std::size_t target_index) {
+    constexpr mjtNum kIdentity[9] = {1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0};
+    constexpr float kPathRgba[4] = {0.1F, 0.65F, 1.0F, 0.38F};
+    constexpr float kCurrentRgba[4] = {1.0F, 0.85F, 0.1F, 1.0F};
+
+    const std::size_t stride = std::max<std::size_t>(1, planned_tool_path_.size() / 120);
+    for (std::size_t i = 0; i < planned_tool_path_.size(); i += stride) {
+      if (mjv_scene_.ngeom >= mjv_scene_.maxgeom) {
+        return;
+      }
+      const auto& point = planned_tool_path_[i];
+      const mjtNum size[3] = {0.008, 0.0, 0.0};
+      const mjtNum pos[3] = {point[0], point[1], point[2]};
+      mjv_initGeom(&mjv_scene_.geoms[mjv_scene_.ngeom], mjGEOM_SPHERE, size, pos, kIdentity,
+                   kPathRgba);
+      mjv_scene_.geoms[mjv_scene_.ngeom].category = mjCAT_DECOR;
+      ++mjv_scene_.ngeom;
+    }
+
+    if (mjv_scene_.ngeom < mjv_scene_.maxgeom) {
+      const auto point = scene_.ToolPosition();
+      const mjtNum size[3] = {0.018, 0.0, 0.0};
+      const mjtNum pos[3] = {point[0], point[1], point[2]};
+      mjv_initGeom(&mjv_scene_.geoms[mjv_scene_.ngeom], mjGEOM_SPHERE, size, pos, kIdentity,
+                   kCurrentRgba);
+      mjv_scene_.geoms[mjv_scene_.ngeom].category = mjCAT_DECOR;
+      ++mjv_scene_.ngeom;
+    }
+    (void)target_index;
+  }
+
+  void RenderOverlay(mjrRect viewport, std::size_t target_index, int step) {
+    std::ostringstream left;
+    left << "UR5e live PID execution\n"
+         << "target " << target_index + 1 << "/" << planned_tool_path_.size() << " | step "
+         << step << " | sim " << std::fixed << std::setprecision(2) << scene_.data()->time
+         << " s | robot view " << (show_collision_model_ ? "collision" : "mesh");
+
+    constexpr const char* right = "C: mesh/collision\nEsc: close viewer";
+    mjr_overlay(mjFONT_NORMAL, mjGRID_TOPLEFT, viewport, left.str().c_str(), right, &context_);
+  }
+
+  Ur5Scene& scene_;
+  std::vector<std::array<double, 3>> planned_tool_path_;
+  GLFWwindow* window_ = nullptr;
+  mjvCamera camera_{};
+  mjvOption option_{};
+  mjvScene mjv_scene_{};
+  mjrContext context_{};
+  Clock::time_point start_wall_time_{};
+  bool active_ = false;
+  bool show_collision_model_ = true;
+  bool c_was_down_ = false;
 };
 
 JointArray StateToJoints(const ob::State* state) {
@@ -869,12 +1046,34 @@ std::vector<JointArray> PlanPath(Ur5Scene& scene,
   setup.setStartAndGoalStates(start, goal, 0.04);
   setup.setup();
 
-  const double solve_budget = std::max(0.05, remaining_seconds() * 0.98);
-  const auto solved = setup.solve(solve_budget);
-  if (!solved) {
-    throw std::runtime_error("OMPL did not find a path inside the 500 ms budget");
+  bool exact_solution = false;
+  int solve_attempts = 0;
+  int approximate_attempts = 0;
+  while (remaining_seconds() > kMinimumSplineAttemptBudgetSeconds) {
+    const double usable_time = remaining_seconds() - kMinimumSplineAttemptBudgetSeconds;
+    if (usable_time < kMinOmplSolveAttemptSeconds) {
+      break;
+    }
+    const double solve_budget =
+        std::min(kMaxOmplSolveAttemptSeconds, std::max(kMinOmplSolveAttemptSeconds, usable_time));
+    if (solve_attempts > 0) {
+      setup.getProblemDefinition()->clearSolutionPaths();
+      planner->clear();
+    }
+    ++solve_attempts;
+    const auto solved = setup.solve(solve_budget);
+    if (solved == ob::PlannerStatus::EXACT_SOLUTION) {
+      exact_solution = true;
+      break;
+    }
+    if (solved) {
+      ++approximate_attempts;
+    }
   }
-  const bool exact_solution = solved == ob::PlannerStatus::EXACT_SOLUTION;
+  if (!exact_solution) {
+    throw std::runtime_error(
+        "OMPL only found approximate paths inside the 500 ms budget; refusing partial fallback");
+  }
 
   const std::size_t raw_state_count = setup.getSolutionPath().getStateCount();
   og::PathGeometric raw_path = setup.getSolutionPath();
@@ -950,7 +1149,13 @@ std::vector<JointArray> PlanPath(Ur5Scene& scene,
       planned_path = shortcut_linear;
       fallback_source = "shortcut linear hard-clearance only";
     } else {
-      throw std::runtime_error("No fallback linear path preserved ring passage and hard clearance");
+      throw std::runtime_error(
+          "No fallback linear path preserved ring passage and hard clearance; "
+          "raw_passes_ring=" +
+          std::string(raw_passes_ring ? "true" : "false") +
+          ", raw_hard_violations=" + std::to_string(raw_hard_violations) +
+          ", shortcut_passes_ring=" + std::string(shortcut_passes_ring ? "true" : "false") +
+          ", shortcut_hard_violations=" + std::to_string(shortcut_hard_violations));
     }
   }
 
@@ -963,6 +1168,8 @@ std::vector<JointArray> PlanPath(Ur5Scene& scene,
 
   std::cout << "OMPL raw path states: " << raw_state_count << '\n';
   std::cout << "OMPL exact solution: " << std::boolalpha << exact_solution << '\n';
+  std::cout << "OMPL solve attempts: " << solve_attempts << '\n';
+  std::cout << "OMPL approximate attempts rejected: " << approximate_attempts << '\n';
   std::cout << "OMPL shortcut-simplified hard knots: " << simplified_state_count << '\n';
   std::cout << "OMPL shortcut path accepted: " << std::boolalpha << shortcut_valid << '\n';
   std::cout << "Shortcut linear path passes ring opening: " << std::boolalpha
@@ -1051,8 +1258,11 @@ void WritePlannedPath(const std::filesystem::path& path_file,
 void ExecutePath(const std::filesystem::path& trace_file,
                  Ur5Scene& scene,
                  const JointArray& home_q,
-                 const std::vector<JointArray>& path) {
+                 const std::vector<JointArray>& path,
+                 bool live_view) {
+  const std::vector<std::array<double, 3>> planned_tool_path = ComputeToolPath(scene, path);
   scene.ResetTo(home_q);
+  LivePidViewer viewer(scene, planned_tool_path, live_view);
   JointArray integral{};
   std::ofstream out(trace_file);
   out << "step,target_index,q0,q1,q2,q3,q4,q5,tool_x,tool_y,tool_z,obstacle_contacts,"
@@ -1092,6 +1302,8 @@ void ExecutePath(const std::filesystem::path& trace_file,
             MaxAbs(scene.CurrentVelocity()) < 0.025) {
           break;
         }
+        viewer.Render(target_index, step);
+        viewer.Pace(scene.data()->time);
       }
     }
     previous_target = target;
@@ -1143,15 +1355,34 @@ void ReportRingPassage(Ur5Scene& scene, const std::vector<JointArray>& path) {
 }  // namespace
 
 int main(int argc, char** argv) {
+  bool live_view = true;
+  std::optional<std::filesystem::path> scene_arg;
+  for (int i = 1; i < argc; ++i) {
+    const std::string_view arg(argv[i]);
+    if (arg == "--no-live") {
+      live_view = false;
+    } else if (arg == "--live") {
+      live_view = true;
+    } else if (arg == "--help" || arg == "-h") {
+      std::cout << "Usage: " << argv[0] << " [--live|--no-live] [scene.xml]\n";
+      return 0;
+    } else if (!scene_arg.has_value()) {
+      scene_arg = std::filesystem::path(arg);
+    } else {
+      std::cerr << "error: unexpected argument: " << arg << '\n';
+      return 1;
+    }
+  }
+
   const std::filesystem::path scene_path =
-      argc > 1 ? std::filesystem::path(argv[1])
-               : std::filesystem::path(UR5_MUJOCO_OMPL_DEFAULT_SCENE);
+      scene_arg.value_or(std::filesystem::path(UR5_MUJOCO_OMPL_DEFAULT_SCENE));
 
   try {
     Ur5Scene scene(scene_path);
     std::cout << "Loaded scene: " << scene_path << '\n';
     std::cout << "Robot model: " << scene.robot_label() << '\n';
     std::cout << "Control mode: " << scene.ControlModeLabel() << '\n';
+    std::cout << "Live PID viewer: " << std::boolalpha << live_view << '\n';
     std::cout << "MuJoCo model: nq=" << scene.model()->nq << " nv=" << scene.model()->nv
               << " nu=" << scene.model()->nu << '\n';
 
@@ -1166,7 +1397,7 @@ int main(int argc, char** argv) {
     ReportRingPassage(scene, path);
 
     WritePlannedPath("planned_path.csv", scene, path);
-    ExecutePath("executed_trace.csv", scene, home, path);
+    ExecutePath("executed_trace.csv", scene, home, path, live_view);
 
     const auto final_tool = scene.ToolPosition();
     std::cout << "Final tool position: [" << std::fixed << std::setprecision(3)

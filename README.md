@@ -48,16 +48,30 @@ cmake --build build -j
 ./build/ur5_clutter_plan
 ```
 
+This plans the path, opens a live MuJoCo window for the PID execution preview,
+and still writes `planned_path.csv` and `executed_trace.csv`.
+
 Optional scene argument:
 
 ```bash
 ./build/ur5_clutter_plan /path/to/scene.xml
 ```
 
+Non-interactive run without the live PID window:
+
+```bash
+./build/ur5_clutter_plan --no-live
+```
+
 The planner rejects actual obstacle contacts. OMPL state validity and final path
 acceptance use a 1.5 cm clearance margin between robot collision geometry and
 shelf/ring obstacles. The planner has a 500 ms wall-time budget for OMPL,
 shortcutting, spline fitting, spline repair, and linear fallback selection.
+
+OMPL approximate solutions are rejected because they may be partial paths that
+do not actually reach the shelf-side goal. The planner retries bounded OMPL
+attempts inside the same 500 ms budget and only sends exact start-to-goal paths
+into spline fitting or linear fallback.
 
 The planned path is the hard gate. The MuJoCo position-servo execution preview
 still reports obstacle contacts and clearance-margin dips, but only actual
@@ -67,10 +81,16 @@ invalid.
 
 ## Visualize
 
-First generate a path:
+The planner executable already shows live PID execution after planning. In that
+live window:
+
+- `C`: toggle robot mesh view vs robot collision-geometry view
+- `Esc`: close the live viewer while the CSV write continues
+
+For later replay from CSV, first generate a path:
 
 ```bash
-./build/ur5_clutter_plan
+./build/ur5_clutter_plan --no-live
 ```
 
 Then replay it:
@@ -120,6 +140,8 @@ C2 spline max C1 discontinuity: <near zero>
 C2 spline max C2 discontinuity: <near zero>
 Planner used C2 spline: true|false
 Planner fallback: raw OMPL linear|shortcut linear
+OMPL solve attempts: <small integer>
+OMPL approximate attempts rejected: <count>
 Planning wall time: < 500 ms
 Planned path obstacle-contact states: 0
 Planning obstacle clearance: 0.015 m

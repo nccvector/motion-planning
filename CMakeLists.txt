@@ -118,6 +118,7 @@ target_link_libraries(ur5_clutter_plan
   PRIVATE
     ${UR5_MUJOCO_TARGET}
     ${UR5_OMPL_TARGET}
+    glfw
 )
 target_compile_definitions(ur5_clutter_plan
   PRIVATE
