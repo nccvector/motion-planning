@@ -22,7 +22,7 @@ This project is intentionally separate from `projects/ros2-learning`.
   - tries to fit a natural cubic joint-space spline through those knots, giving
     C2 continuity at internal knots,
   - repairs failed splines by adding violating samples as extra knots while the
-    500 ms planning budget still has room,
+    3000 ms planning budget still has room,
   - falls back to a linear interpolation of the OMPL path if spline repair runs
     out of budget,
   - executes the sampled path with Menagerie position actuators,
@@ -32,9 +32,10 @@ This project is intentionally separate from `projects/ros2-learning`.
   - replays `planned_path.csv` or `executed_trace.csv`,
   - shows the tool path and current tool position in a native MuJoCo/GLFW window.
 - A C++23 executable, `ur5_goal_loop_demo`, that:
-  - cycles through 20 Monte Carlo-selected valid joint-space goals,
-  - alternates between 10 red-ring approach-side goals and 10 shelf-side window
-    goals split across the low/high copied shelf windows,
+  - cycles through 24 valid joint-space entries,
+  - returns to one robust red-ring staging pose between 12 Monte Carlo-selected
+    shelf-side gap goals cycling through three spaces between four shelf-entry
+    poles,
   - plans each next segment on a separate planning scene/thread while the viewer
     stays responsive,
   - retries failed planning segments up to 5 times,
@@ -44,8 +45,8 @@ This project is intentionally separate from `projects/ros2-learning`.
 - A C++23 executable, `ur5_goal_monte_carlo`, that:
   - runs deterministic Monte Carlo exploration of valid states in the current
     scene,
-  - ranks primary-ring approach-side goals and shelf-window goals,
-  - prints a C++ initializer for an alternating 20-goal loop list.
+  - ranks primary-ring approach-side goals and shelf-gap finish-line goals,
+  - prints a C++ initializer for an alternating 24-goal loop list.
 - A C++23 executable, `ur5_path_diagnose`, that:
   - checks robot collision geometry against the red ring along a saved CSV path,
   - samples between adjacent CSV rows to catch interpolation/grazing issues.
@@ -119,18 +120,22 @@ Regenerate Monte Carlo candidates:
 ./build/ur5_goal_monte_carlo
 ```
 
-The current scene uses a tightened primary red ring and two copied red shelf
-windows. The loop goal list is checked to keep 10 approach-side goals and 10
-shelf-side goals, split as 5 low-window and 5 high-window shelf poses.
+The current scene uses a tightened primary red ring plus four vertical red
+shelf-entry poles. Those poles create three empty spaces. The logical finish
+line is at the pole plane (`x = -0.72 m`), and the generated shelf poses place
+the end effector at least 1 cm deeper toward the shelf. The loop goal list is
+checked to keep 12 approach-side entries and 12 shelf-side goals, split as
+4 goals through each pole gap. The approach-side entries intentionally reuse one
+robust staging pose so the long-running loop keeps replanning reliably.
 
 The planner rejects actual obstacle contacts. OMPL state validity and final path
 acceptance use a 1.5 cm clearance margin between robot collision geometry and
-shelf/ring obstacles. The planner has a 500 ms wall-time budget for OMPL,
+shelf/ring obstacles. The planner has a 3000 ms wall-time budget for OMPL,
 shortcutting, spline fitting, spline repair, and linear fallback selection.
 
 OMPL approximate solutions are rejected because they may be partial paths that
 do not actually reach the shelf-side goal. The planner retries bounded OMPL
-attempts inside the same 500 ms budget and only sends exact start-to-goal paths
+attempts inside the same 3000 ms budget and only sends exact start-to-goal paths
 into spline fitting or linear fallback.
 
 The planned path is the hard gate. The MuJoCo position-servo execution preview
@@ -206,7 +211,7 @@ Planner used C2 spline: true|false
 Planner fallback: raw OMPL linear|shortcut linear
 OMPL solve attempts: <small integer>
 OMPL approximate attempts rejected: <count>
-Planning wall time: < 500 ms
+Planning wall time: < 3000 ms
 Planned path obstacle-contact states: 0
 Planning obstacle clearance: 0.015 m
 Planned path clearance-violation states: 0

@@ -425,6 +425,76 @@
   - `./build/ur5_path_diagnose build/scenes/ur5e_clutter.xml planned_path.csv 128`
     found 0 contacts, 0 negative robot-ring distances, and closest red-ring
     distance `0.015159 m`.
+- Moved the shelf windows into side-by-side A/B/C compartments:
+  - kept the primary red ring as the approach-side threading/staging window,
+  - replaced the stacked low/high shelf windows with `shelf_window_a`,
+    `shelf_window_b`, and `shelf_window_c` at the shelf face,
+  - widened the shelf window openings enough for the UR5e collision geometry
+    while keeping the A/B/C centers separated across the shelf,
+  - generalized window validation and Monte Carlo selection to three shelf
+    buckets.
+- Regenerated the endless-loop goals for A/B/C cycling:
+  - `./build/ur5_goal_monte_carlo --samples 800000` produced 12 approach goals
+    and 4 goals for each shelf window,
+  - `./build/ur5_goal_loop_demo --check-goals` verified 24 goals: 12
+    approach-side and 12 shelf-side, balanced 4/4/4 across A/B/C,
+  - `./build/ur5_goal_loop_demo --check-transitions` verified all 24 loop
+    transitions and nonzero transition coverage for primary, A, B, and C
+    windows,
+  - default `./build/ur5_goal_monte_carlo` also succeeds after the refreshed
+    one-shot candidate anchors.
+- Verified after the A/B/C window change:
+  - `cmake --build build --target ur5_clutter_plan ur5_goal_loop_demo ur5_goal_monte_carlo ur5_path_diagnose`,
+  - `./build/ur5_clutter_plan --no-live`,
+  - `MuJoCo timestep: 0.0166667 s`,
+  - PID execution steps: `301`,
+  - PID obstacle-contact steps: `0`,
+  - `./build/ur5_path_replay --check build/scenes/ur5e_clutter.xml executed_trace.csv`,
+  - `./build/ur5_path_diagnose build/scenes/ur5e_clutter.xml planned_path.csv 128`
+    found 0 contacts, 0 negative robot-ring distances, and closest red-ring
+    distance `0.018087 m`.
+- Replaced the shelf A/B/C windows with a four-column pole scene:
+  - removed the three red shelf-window bodies,
+  - added four thin vertical red shelf-entry poles at the shelf entry plane,
+  - removed the old shelf-entry guard posts so the three spaces between poles
+    are the actual shelf-entry constraints,
+  - kept the primary red ring as the approach-side threading/staging window,
+  - changed the shelf-side logical targets to `shelf_gap_a`, `shelf_gap_b`,
+    and `shelf_gap_c`,
+  - set the finish line at the pole plane and the shelf goal target to 1 cm
+    deeper toward the shelf.
+- Regenerated robot poses for all three pole gaps:
+  - `./build/ur5_goal_monte_carlo --samples 500000` produced 12 approach goals
+    and 4 goals through each shelf pole gap,
+  - refreshed one-shot home/goal candidates from those generated poses,
+  - refreshed the 24-goal endless-loop initializer to use one robust
+    approach-side staging pose between shelf-gap A, B, C poses because the
+    fully diverse approach list produced brittle 500 ms transition pairs.
+- Verified after the pole-gap scene change:
+  - `cmake --build build --target ur5_goal_loop_demo ur5_clutter_plan ur5_goal_monte_carlo`,
+  - default `./build/ur5_goal_monte_carlo` now uses 500k samples and produces
+    at least 4 goals for each shelf gap,
+  - `./build/ur5_goal_loop_demo --check-goals` verifies 24 loop entries, 12
+    approach-side entries, 12 shelf-side entries, and balanced 4/4/4 coverage
+    across `shelf_gap_a`, `shelf_gap_b`, and `shelf_gap_c`,
+  - `./build/ur5_goal_loop_demo --check-transitions` verifies all 24 loop
+    transitions and nonzero transition coverage for the primary ring and all
+    three shelf gaps,
+  - `./build/ur5_clutter_plan --no-live` selected a `shelf_gap_a` goal and
+    planned/executed with 0 planned contacts, 0 planned clearance violations,
+    0 PID obstacle-contact steps, and 0 PID clearance-violation trace rows,
+  - `./build/ur5_path_replay --check build/scenes/ur5e_clutter.xml executed_trace.csv`,
+  - `./build/ur5_path_diagnose build/scenes/ur5e_clutter.xml planned_path.csv 128`
+    found 0 robot-ring contacts, 0 negative robot-ring distances, and closest
+    robot-ring distance `0.015483 m`.
+- Increased the motion-planning wall-time budget from 500 ms to 3000 ms:
+  - `kPlanningTimeBudgetSeconds` is now `3.000 s`,
+  - README budget text and the approximate-path rejection message now report
+    the 3000 ms budget,
+  - verified with `cmake --build build --target ur5_goal_loop_demo
+    ur5_clutter_plan`, `./build/ur5_goal_loop_demo --check-goals`, and
+    `./build/ur5_clutter_plan --no-live`, which reported
+    `Planning time budget: 3.000 s`.
 
 ## Next
 

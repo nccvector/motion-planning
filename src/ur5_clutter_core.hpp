@@ -37,17 +37,24 @@ namespace {
 constexpr int kDof = 6;
 constexpr double kPi = 3.14159265358979323846;
 constexpr double kRingPlaneX = -0.45;
-constexpr double kShelfWindowPlaneX = -0.72;
+constexpr double kShelfColumnPlaneX = -0.72;
+constexpr double kShelfFinishLineX = kShelfColumnPlaneX;
+constexpr double kShelfGoalExtraAfterFinish = 0.010;
+constexpr double kShelfGoalTargetX = kShelfFinishLineX - kShelfGoalExtraAfterFinish;
+constexpr double kShelfWindowPlaneX = kShelfFinishLineX;
 constexpr double kRingCenterZ = 0.36;
 constexpr double kRingHalfOpeningY = 0.235;
 constexpr double kRingHalfOpeningZ = 0.170;
+constexpr double kShelfWindowHalfOpeningY = 0.095;
+constexpr double kShelfWindowCenterZ = 0.34;
+constexpr double kShelfFinishHalfOpeningZ = 0.220;
 constexpr double kWindowPlaneTolerance = 0.050;
 // Plan with cushion; validate with the hard floor we actually require.
 constexpr double kRequiredObstacleClearance = 0.010;
 constexpr double kOmplObstacleClearance = 0.015;
 constexpr double kPlanningObstacleClearance = 0.015;
 constexpr std::size_t kInterpolatedPathStates = 480;
-constexpr double kPlanningTimeBudgetSeconds = 0.500;
+constexpr double kPlanningTimeBudgetSeconds = 3.000;
 constexpr double kMaxOmplSolveAttemptSeconds = 0.180;
 constexpr double kMinOmplSolveAttemptSeconds = 0.020;
 constexpr int kMaxC2RepairIterations = 8;
@@ -72,10 +79,17 @@ struct WindowSpec {
   double half_opening_z;
 };
 
-constexpr std::array<WindowSpec, 3> kWindowSpecs = {{
+constexpr std::size_t kShelfWindowStartIndex = 1;
+constexpr std::size_t kShelfWindowCount = 3;
+
+constexpr std::array<WindowSpec, 4> kWindowSpecs = {{
     {"primary_ring", kRingPlaneX, 0.0, kRingCenterZ, kRingHalfOpeningY, kRingHalfOpeningZ},
-    {"shelf_low_window", kShelfWindowPlaneX, -0.18, 0.25, kRingHalfOpeningY, kRingHalfOpeningZ},
-    {"shelf_high_window", kShelfWindowPlaneX, -0.18, 0.40, kRingHalfOpeningY, kRingHalfOpeningZ},
+    {"shelf_gap_a", kShelfWindowPlaneX, -0.30, kShelfWindowCenterZ,
+     kShelfWindowHalfOpeningY, kShelfFinishHalfOpeningZ},
+    {"shelf_gap_b", kShelfWindowPlaneX, -0.10, kShelfWindowCenterZ,
+     kShelfWindowHalfOpeningY, kShelfFinishHalfOpeningZ},
+    {"shelf_gap_c", kShelfWindowPlaneX, 0.12, kShelfWindowCenterZ,
+     kShelfWindowHalfOpeningY, kShelfFinishHalfOpeningZ},
 }};
 
 constexpr std::array<double, 2> kWindowLayerPlanes = {{
@@ -130,38 +144,34 @@ const RobotNames kSimpleUr5LikeNames = {
      "wrist_2_motor", "wrist_3_motor"},
     "tool0"};
 
-const std::array<JointArray, 10> kHomeCandidates = {{
-    {-0.590469, -1.789239, 2.160045, -0.792644, 0.215248, -0.075016},
-    {-0.666903, -1.870113, 2.179305, -0.472320, 0.275371, 0.379068},
-    {-0.525574, -1.736350, 2.037490, -0.546228, -0.395963, 0.083717},
-    {-0.478010, -1.950792, 2.415944, -1.129555, 0.534752, 0.087078},
-    {-0.209172, -1.821361, 2.195852, -0.716527, 0.619420, -0.058810},
-    {-0.761287, -1.959243, 2.244084, -1.080483, -0.040121, 0.341237},
-    {-0.168666, -1.749368, 2.065366, -0.485767, 0.074824, -0.141946},
-    {-0.136299, -2.010973, 2.297995, -0.715362, 0.221923, 0.251150},
-    {-0.250164, -1.893295, 2.204828, -0.970754, -0.210796, -0.039012},
-    {-0.446430, -1.642830, 2.137893, -0.228440, 0.527161, 0.051728},
+const std::array<JointArray, 12> kHomeCandidates = {{
+    {-0.583032, -1.817003, 2.178682, -0.769127, 0.401531, -0.084894},
+    {-0.658288, -1.824524, 2.127059, -0.623686, -0.122959, 0.002327},
+    {-0.678173, -1.926212, 2.259926, -0.963480, 0.134084, 0.338435},
+    {-0.634096, -1.836295, 2.155486, -0.423529, 0.282597, 0.325637},
+    {-0.620929, -1.815655, 2.208364, -1.058377, 0.041404, -0.394379},
+    {-0.610830, -1.727607, 2.010051, -0.260588, 0.230487, -0.205209},
+    {-0.618327, -1.947966, 2.381882, -1.266605, 0.477733, -0.180852},
+    {-0.524556, -1.889583, 2.272900, -0.835037, 0.808309, 0.256985},
+    {-0.855268, -2.218835, 2.374038, -0.780203, 0.157284, -0.043131},
+    {-0.758462, -2.071718, 2.301036, -0.487947, 0.397963, -0.461046},
+    {-0.780227, -2.218195, 2.395407, -0.494435, 0.643286, 0.022863},
+    {-0.623562, -1.871818, 2.210439, -1.323817, -0.237983, 0.058322},
 }};
 
-const std::array<JointArray, 18> kGoalCandidates = {{
-    {-0.066236, -0.919917, 1.220043, -0.877790, -0.265118, 0.080547},
-    {-0.037932, -1.006641, 1.255414, -0.865408, 0.065840, 0.239123},
-    {-0.101850, -0.976174, 1.282816, -0.992021, 0.000102, 0.577577},
-    {-0.069395, -1.014954, 1.279989, -0.681565, 0.162805, -0.334207},
-    {-0.025488, -0.992668, 1.380861, -0.933884, 0.277461, -0.228169},
-    {-0.059865, -1.039368, 1.346909, -0.913560, 0.556614, -0.000604},
-    {0.022854, -0.862817, 1.198943, -1.393905, 0.167542, 0.002161},
-    {0.057985, -0.753526, 1.018779, -1.381314, 0.348522, -0.108451},
-    {-0.085033, -0.992605, 1.380634, -0.662850, 0.538806, 0.195147},
-    {-0.257410, -1.055477, 1.323687, -0.579905, 0.519991, 0.497981},
-    {-0.066236, -0.919917, 1.220043, -0.877790, -0.265118, 0.080547},
-    {-0.037932, -1.006641, 1.255414, -0.865408, 0.065840, 0.239123},
-    {-0.101850, -0.976174, 1.282816, -0.992021, 0.000102, 0.577577},
-    {-0.069395, -1.014954, 1.279989, -0.681565, 0.162805, -0.334207},
-    {-0.025488, -0.992668, 1.380861, -0.933884, 0.277461, -0.228169},
-    {-0.059865, -1.039368, 1.346909, -0.913560, 0.556614, -0.000604},
-    {0.022854, -0.862817, 1.198943, -1.393905, 0.167542, 0.002161},
-    {0.057985, -0.753526, 1.018779, -1.381314, 0.348522, -0.108451},
+const std::array<JointArray, 12> kGoalCandidates = {{
+    {0.181099, -0.834922, 1.194771, -1.182946, 1.054233, 0.014927},
+    {-0.272575, -0.767697, 1.033570, -1.239197, 0.364753, -0.525439},
+    {-0.353023, -0.834006, 1.059281, -1.259558, -0.014792, -0.148578},
+    {0.182364, -0.833842, 1.252389, -1.429893, 1.210342, 0.526325},
+    {-0.278323, -0.793324, 1.001705, -1.911068, 0.323109, 0.283218},
+    {-0.346598, -0.881528, 1.170102, -1.202129, 0.318140, -0.647455},
+    {0.185796, -0.865629, 1.137453, -0.767655, 1.076431, -0.698241},
+    {-0.081339, -1.030858, 1.346229, -0.776390, 1.276983, -0.607144},
+    {-0.362126, -0.821684, 1.084173, -1.102080, 0.490087, 0.057136},
+    {0.148336, -0.892706, 1.085891, -0.505721, 1.140027, 0.082147},
+    {-0.068444, -0.993667, 1.269892, -0.684621, 1.357602, 0.005784},
+    {-0.360138, -0.899815, 1.264117, -1.706853, 0.388415, 0.139379},
 }};
 
 struct MjModelDeleter {
@@ -1137,11 +1147,11 @@ JointArray SelectGoal(Ur5Scene& scene) {
     bool shelf_window_aligned = false;
     for (const WindowSpec& window : kWindowSpecs) {
       if (std::abs(window.plane_x - kShelfWindowPlaneX) < 1e-9 &&
-          ToolAlignedWithWindow(tool, window, 1.15)) {
+          ToolAlignedWithWindow(tool, window)) {
         shelf_window_aligned = true;
       }
     }
-    const bool after_ring = tool[0] < kShelfWindowPlaneX + kWindowPlaneTolerance;
+    const bool after_ring = tool[0] < kShelfGoalTargetX;
     const bool shelf_height = tool[2] > 0.10 && tool[2] < 0.65;
     const bool valid = contacts.empty() && clearance_violations.empty() && after_ring &&
                        shelf_height && shelf_window_aligned;
@@ -1149,13 +1159,13 @@ JointArray SelectGoal(Ur5Scene& scene) {
               << std::setprecision(3) << tool[0] << ", " << tool[1] << ", " << tool[2]
               << "], valid=" << std::boolalpha << valid << '\n';
     if (!after_ring) {
-      std::cout << "  rejected: tool is not beyond the ring toward the shelf\n";
+      std::cout << "  rejected: tool has not crossed the shelf finish line deeply enough\n";
     }
     if (!shelf_height) {
       std::cout << "  rejected: tool is outside the shelf height band\n";
     }
     if (!shelf_window_aligned) {
-      std::cout << "  rejected: tool is not aligned with a shelf window opening\n";
+      std::cout << "  rejected: tool is not aligned with a shelf gap finish line\n";
     }
     for (const auto& contact : contacts) {
       std::cout << "  rejected obstacle contact: " << contact << '\n';
@@ -1236,7 +1246,7 @@ PlanResult PlanPath(Ur5Scene& scene,
   }
   if (!exact_solution) {
     throw std::runtime_error(
-        "OMPL only found approximate paths inside the 500 ms budget; refusing partial fallback");
+        "OMPL only found approximate paths inside the 3000 ms budget; refusing partial fallback");
   }
 
   const std::size_t raw_state_count = setup.getSolutionPath().getStateCount();

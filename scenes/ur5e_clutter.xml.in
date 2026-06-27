@@ -47,18 +47,11 @@
       <geom name="ring_bottom_bar" type="box" pos="0 0 -0.205" size="0.035 0.305 0.035" material="ring_mat"/>
     </body>
 
-    <body name="ring_shelf_low_window" pos="-0.72 -0.18 0.25">
-      <geom name="ring_shelf_low_left_bar" type="box" pos="0 -0.27 0" size="0.035 0.035 0.205" material="ring_mat"/>
-      <geom name="ring_shelf_low_right_bar" type="box" pos="0 0.27 0" size="0.035 0.035 0.205" material="ring_mat"/>
-      <geom name="ring_shelf_low_top_bar" type="box" pos="0 0 0.205" size="0.035 0.305 0.035" material="ring_mat"/>
-      <geom name="ring_shelf_low_bottom_bar" type="box" pos="0 0 -0.205" size="0.035 0.305 0.035" material="ring_mat"/>
-    </body>
-
-    <body name="ring_shelf_high_window" pos="-0.72 -0.18 0.40">
-      <geom name="ring_shelf_high_left_bar" type="box" pos="0 -0.27 0" size="0.035 0.035 0.205" material="ring_mat"/>
-      <geom name="ring_shelf_high_right_bar" type="box" pos="0 0.27 0" size="0.035 0.035 0.205" material="ring_mat"/>
-      <geom name="ring_shelf_high_top_bar" type="box" pos="0 0 0.205" size="0.035 0.305 0.035" material="ring_mat"/>
-      <geom name="ring_shelf_high_bottom_bar" type="box" pos="0 0 -0.205" size="0.035 0.305 0.035" material="ring_mat"/>
+    <body name="ring_shelf_columns" pos="-0.72 0 0.34">
+      <geom name="ring_shelf_column_1" type="box" pos="0 -0.42 0" size="0.018 0.018 0.285" material="ring_mat"/>
+      <geom name="ring_shelf_column_2" type="box" pos="0 -0.18 0" size="0.018 0.018 0.285" material="ring_mat"/>
+      <geom name="ring_shelf_column_3" type="box" pos="0 -0.02 0" size="0.018 0.018 0.285" material="ring_mat"/>
+      <geom name="ring_shelf_column_4" type="box" pos="0 0.26 0" size="0.018 0.018 0.285" material="ring_mat"/>
     </body>
 
     <body name="ring_approach_left_post" pos="-0.28 0.32 0.23">
@@ -77,12 +70,6 @@
       <geom name="ring_exit_upper_baffle_geom" type="box" size="0.035 0.28 0.035" material="clutter_mat"/>
     </body>
 
-    <body name="shelf_entry_left_guard" pos="-0.69 -0.52 0.30">
-      <geom name="shelf_entry_left_guard_geom" type="box" size="0.035 0.035 0.20" material="clutter_mat"/>
-    </body>
-    <body name="shelf_entry_right_guard" pos="-0.70 0.22 0.46">
-      <geom name="shelf_entry_right_guard_geom" type="box" size="0.035 0.035 0.22" material="clutter_mat"/>
-    </body>
     <body name="shelf_shallow_goal_blocker" pos="-0.585 -0.135 0.120">
       <geom name="shelf_shallow_goal_blocker_geom" type="box" size="0.028 0.055 0.045" material="clutter_mat"/>
     </body>

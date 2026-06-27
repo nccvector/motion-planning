@@ -7,8 +7,9 @@
 namespace {
 
 constexpr std::uint64_t kDefaultSeed = 20260627;
-constexpr int kDefaultSamples = 200000;
-constexpr int kKeepPerSide = 10;
+constexpr int kDefaultSamples = 500000;
+constexpr int kKeepPerSide = 12;
+constexpr int kKeepPerShelfWindow = kKeepPerSide / static_cast<int>(kShelfWindowCount);
 constexpr double kMinJointDiversity = 0.55;
 constexpr double kAnchorNoiseStddev = 0.22;
 
@@ -55,9 +56,9 @@ double NeedleSideScore(const std::array<double, 3>& tool) {
 }
 
 double ShelfSideScore(const std::array<double, 3>& tool, const WindowSpec& window) {
-  const double desired_x = kShelfWindowPlaneX;
+  const double desired_x = kShelfGoalTargetX;
   const double shelf_reach_bonus =
-      tool[0] < kShelfWindowPlaneX + kWindowPlaneTolerance ? 1.4 : 0.0;
+      tool[0] < kShelfGoalTargetX ? 1.4 : 0.0;
   return shelf_reach_bonus + WindowAlignmentScore(tool, window) -
          1.0 * std::abs(tool[0] - desired_x);
 }
@@ -75,7 +76,7 @@ std::optional<std::size_t> ShelfWindowIndexForTool(const std::array<double, 3>& 
     if (std::abs(window.plane_x - kShelfWindowPlaneX) > 1e-9) {
       continue;
     }
-    if (!ToolAlignedWithWindow(tool, window, 1.15)) {
+    if (!ToolAlignedWithWindow(tool, window)) {
       continue;
     }
     const double distance = std::abs(tool[1] - window.center_y) +
@@ -89,7 +90,7 @@ std::optional<std::size_t> ShelfWindowIndexForTool(const std::array<double, 3>& 
 }
 
 bool IsShelfSideGoal(const std::array<double, 3>& tool) {
-  return tool[0] < kShelfWindowPlaneX + kWindowPlaneTolerance && tool[2] > 0.08 &&
+  return tool[0] < kShelfGoalTargetX && tool[2] > 0.08 &&
          tool[2] < 0.66 &&
          ShelfWindowIndexForTool(tool).has_value();
 }
@@ -134,13 +135,17 @@ void PrintCandidate(const Candidate& candidate, int index, std::string_view labe
 }
 
 void PrintCppInitializer(const std::vector<Candidate>& needle_side,
-                         const std::array<std::vector<Candidate>, 2>& shelf_windows) {
+                         const std::array<std::vector<Candidate>, kShelfWindowCount>& shelf_windows) {
   std::cout << "\nC++ alternating loop-goal initializer:\n";
   std::cout << "std::vector<JointArray> BuildLoopGoals() {\n";
+  std::cout << "  // Alternating Monte Carlo goals from `ur5_goal_monte_carlo`: approach-side\n";
+  std::cout << "  // states near the primary red-ring opening, then shelf-side states that\n";
+  std::cout << "  // cross the logical finish lines behind the three pole gaps.\n";
   std::cout << "  return {\n";
   for (int i = 0; i < kKeepPerSide; ++i) {
-    const std::vector<Candidate>& shelf_side = shelf_windows[i % 2];
-    const Candidate* pair[2] = {&needle_side[i], &shelf_side[i / 2]};
+    const std::size_t shelf_bucket = static_cast<std::size_t>(i) % kShelfWindowCount;
+    const std::vector<Candidate>& shelf_side = shelf_windows[shelf_bucket];
+    const Candidate* pair[2] = {&needle_side[i], &shelf_side[i / kShelfWindowCount]};
     for (const Candidate* candidate : pair) {
       std::cout << "      {";
       for (int j = 0; j < kDof; ++j) {
@@ -216,7 +221,7 @@ int main(int argc, char** argv) {
     std::uniform_int_distribution<std::size_t> home_anchor(0, kHomeCandidates.size() - 1);
     std::uniform_int_distribution<std::size_t> goal_anchor(0, kGoalCandidates.size() - 1);
     std::vector<Candidate> needle_side;
-    std::array<std::vector<Candidate>, 2> shelf_windows;
+    std::array<std::vector<Candidate>, kShelfWindowCount> shelf_windows;
     int valid = 0;
     for (int sample = 0; sample < samples; ++sample) {
       JointArray q{};
@@ -255,7 +260,7 @@ int main(int argc, char** argv) {
         if (!shelf_window_index.has_value()) {
           continue;
         }
-        const std::size_t shelf_bucket = *shelf_window_index == 1 ? 0 : 1;
+        const std::size_t shelf_bucket = *shelf_window_index - kShelfWindowStartIndex;
         shelf_windows[shelf_bucket].push_back(
             {q,
              tool,
@@ -266,33 +271,43 @@ int main(int argc, char** argv) {
     }
 
     const std::vector<Candidate> selected_needle = SelectDiverse(needle_side, kKeepPerSide);
-    std::array<std::vector<Candidate>, 2> selected_shelf_windows = {{
-        SelectDiverse(shelf_windows[0], kKeepPerSide / 2),
-        SelectDiverse(shelf_windows[1], kKeepPerSide / 2),
-    }};
+    std::array<std::vector<Candidate>, kShelfWindowCount> selected_shelf_windows;
+    for (std::size_t i = 0; i < kShelfWindowCount; ++i) {
+      selected_shelf_windows[i] = SelectDiverse(shelf_windows[i], kKeepPerShelfWindow);
+    }
 
     std::cout << "Scene: " << scene_path << '\n';
     std::cout << "Seed: " << seed << '\n';
     std::cout << "Samples: " << samples << '\n';
     std::cout << "Valid collision-clear states: " << valid << '\n';
     std::cout << "Needle-side candidates: " << needle_side.size() << '\n';
-    std::cout << "Shelf-low candidates: " << shelf_windows[0].size() << '\n';
-    std::cout << "Shelf-high candidates: " << shelf_windows[1].size() << '\n';
+    for (std::size_t i = 0; i < kShelfWindowCount; ++i) {
+      std::cout << "Shelf " << kWindowSpecs[kShelfWindowStartIndex + i].name
+                << " candidates: " << shelf_windows[i].size() << '\n';
+    }
     std::cout << "Selected needle-side goals: " << selected_needle.size() << '\n';
-    std::cout << "Selected shelf-low goals: " << selected_shelf_windows[0].size() << '\n';
-    std::cout << "Selected shelf-high goals: " << selected_shelf_windows[1].size() << '\n';
+    for (std::size_t i = 0; i < kShelfWindowCount; ++i) {
+      std::cout << "Selected " << kWindowSpecs[kShelfWindowStartIndex + i].name
+                << " goals: " << selected_shelf_windows[i].size() << '\n';
+    }
 
-    if (selected_needle.size() < kKeepPerSide ||
-        selected_shelf_windows[0].size() < kKeepPerSide / 2 ||
-        selected_shelf_windows[1].size() < kKeepPerSide / 2) {
+    bool enough_shelf_goals = true;
+    for (const auto& selected_window : selected_shelf_windows) {
+      enough_shelf_goals = enough_shelf_goals &&
+                           static_cast<int>(selected_window.size()) >= kKeepPerShelfWindow;
+    }
+    if (selected_needle.size() < kKeepPerSide || !enough_shelf_goals) {
       std::cerr << "error: not enough valid goals; increase --samples\n";
       return 1;
     }
 
     for (int i = 0; i < kKeepPerSide; ++i) {
       PrintCandidate(selected_needle[i], i + 1, "needle");
-      const std::vector<Candidate>& shelf_side = selected_shelf_windows[i % 2];
-      PrintCandidate(shelf_side[i / 2], i + 1, i % 2 == 0 ? "shelf-low " : "shelf-high");
+      const std::size_t shelf_bucket = static_cast<std::size_t>(i) % kShelfWindowCount;
+      const std::vector<Candidate>& shelf_side = selected_shelf_windows[shelf_bucket];
+      PrintCandidate(shelf_side[i / kShelfWindowCount],
+                     i + 1,
+                     kWindowSpecs[kShelfWindowStartIndex + shelf_bucket].name);
     }
     PrintCppInitializer(selected_needle, selected_shelf_windows);
   } catch (const std::exception& e) {
