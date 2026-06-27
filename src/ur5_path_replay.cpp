@@ -17,6 +17,8 @@
 #include <thread>
 #include <vector>
 
+#include "ur5_visualization.hpp"
+
 namespace {
 
 constexpr int kDof = 6;
@@ -37,14 +39,6 @@ struct JointBinding {
   int tool_site_id = -1;
 };
 
-struct MouseState {
-  bool left = false;
-  bool middle = false;
-  bool right = false;
-  double last_x = 0.0;
-  double last_y = 0.0;
-};
-
 struct ReplayState {
   std::vector<JointArray> path;
   std::vector<std::array<double, 3>> tool_path;
@@ -54,12 +48,10 @@ struct ReplayState {
   double speed = 1.0;
 };
 
-mjModel* g_model = nullptr;
-mjData* g_data = nullptr;
 mjvCamera g_camera;
 mjvOption g_option;
 mjvScene g_scene;
-MouseState g_mouse;
+ur5vis::InteractiveCamera g_interactive_camera;
 ReplayState* g_replay = nullptr;
 
 std::vector<std::string> SplitCsvLine(const std::string& line) {
@@ -191,36 +183,6 @@ std::vector<std::array<double, 3>> ComputeToolPath(mjModel* model,
   return tool_path;
 }
 
-void AddToolPathMarkers(mjvScene* scene,
-                        const std::vector<std::array<double, 3>>& tool_path,
-                        std::size_t current_frame) {
-  constexpr mjtNum kIdentity[9] = {1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0};
-  constexpr float kPathRgba[4] = {0.1F, 0.65F, 1.0F, 0.38F};
-  constexpr float kCurrentRgba[4] = {1.0F, 0.85F, 0.1F, 1.0F};
-
-  const std::size_t stride = std::max<std::size_t>(1, tool_path.size() / 120);
-  for (std::size_t i = 0; i < tool_path.size(); i += stride) {
-    if (scene->ngeom >= scene->maxgeom) {
-      return;
-    }
-    const auto& point = tool_path[i];
-    const mjtNum size[3] = {0.008, 0.0, 0.0};
-    const mjtNum pos[3] = {point[0], point[1], point[2]};
-    mjv_initGeom(&scene->geoms[scene->ngeom], mjGEOM_SPHERE, size, pos, kIdentity, kPathRgba);
-    scene->geoms[scene->ngeom].category = mjCAT_DECOR;
-    ++scene->ngeom;
-  }
-
-  if (current_frame < tool_path.size() && scene->ngeom < scene->maxgeom) {
-    const auto& point = tool_path[current_frame];
-    const mjtNum size[3] = {0.018, 0.0, 0.0};
-    const mjtNum pos[3] = {point[0], point[1], point[2]};
-    mjv_initGeom(&scene->geoms[scene->ngeom], mjGEOM_SPHERE, size, pos, kIdentity, kCurrentRgba);
-    scene->geoms[scene->ngeom].category = mjCAT_DECOR;
-    ++scene->ngeom;
-  }
-}
-
 void Keyboard(GLFWwindow* window, int key, int, int action, int) {
   if (action != GLFW_PRESS && action != GLFW_REPEAT) {
     return;
@@ -252,54 +214,6 @@ void Keyboard(GLFWwindow* window, int key, int, int action, int) {
   } else if (key == GLFW_KEY_C && action == GLFW_PRESS) {
     g_replay->show_collision_model = !g_replay->show_collision_model;
   }
-}
-
-void ApplyRobotGeometryMode(const ReplayState& replay) {
-  constexpr int kRobotVisualGroup = 2;
-  constexpr int kRobotCollisionGroup = 3;
-  g_option.geomgroup[kRobotVisualGroup] = replay.show_collision_model ? 0 : 1;
-  g_option.geomgroup[kRobotCollisionGroup] = replay.show_collision_model ? 1 : 0;
-}
-
-void MouseButton(GLFWwindow* window, int, int, int) {
-  g_mouse.left = glfwGetMouseButton(window, GLFW_MOUSE_BUTTON_LEFT) == GLFW_PRESS;
-  g_mouse.middle = glfwGetMouseButton(window, GLFW_MOUSE_BUTTON_MIDDLE) == GLFW_PRESS;
-  g_mouse.right = glfwGetMouseButton(window, GLFW_MOUSE_BUTTON_RIGHT) == GLFW_PRESS;
-  glfwGetCursorPos(window, &g_mouse.last_x, &g_mouse.last_y);
-}
-
-void MouseMove(GLFWwindow* window, double xpos, double ypos) {
-  if (!g_mouse.left && !g_mouse.middle && !g_mouse.right) {
-    return;
-  }
-
-  const double dx = xpos - g_mouse.last_x;
-  const double dy = ypos - g_mouse.last_y;
-  g_mouse.last_x = xpos;
-  g_mouse.last_y = ypos;
-
-  int width = 0;
-  int height = 0;
-  glfwGetWindowSize(window, &width, &height);
-  if (height <= 0) {
-    return;
-  }
-
-  const bool shift = glfwGetKey(window, GLFW_KEY_LEFT_SHIFT) == GLFW_PRESS ||
-                     glfwGetKey(window, GLFW_KEY_RIGHT_SHIFT) == GLFW_PRESS;
-
-  mjtMouse action = mjMOUSE_ZOOM;
-  if (g_mouse.right) {
-    action = shift ? mjMOUSE_MOVE_H : mjMOUSE_MOVE_V;
-  } else if (g_mouse.left) {
-    action = shift ? mjMOUSE_ROTATE_H : mjMOUSE_ROTATE_V;
-  }
-
-  mjv_moveCamera(g_model, action, dx / height, dy / height, &g_scene, &g_camera);
-}
-
-void Scroll(GLFWwindow*, double, double yoffset) {
-  mjv_moveCamera(g_model, mjMOUSE_ZOOM, 0.0, -0.05 * yoffset, &g_scene, &g_camera);
 }
 
 void RenderOverlay(mjrRect viewport, const ReplayState& replay, mjrContext* context) {
@@ -372,32 +286,22 @@ int main(int argc, char** argv) {
     glfwMakeContextCurrent(window);
     glfwSwapInterval(1);
 
-    g_model = model.get();
-    g_data = data.get();
     g_replay = &replay;
 
     mjv_defaultCamera(&g_camera);
     mjv_defaultOption(&g_option);
-    ApplyRobotGeometryMode(replay);
+    ur5vis::ApplyRobotGeometryMode(&g_option, replay.show_collision_model);
     mjv_defaultScene(&g_scene);
     mjrContext context;
     mjr_defaultContext(&context);
 
-    mjv_defaultFreeCamera(model.get(), &g_camera);
-    g_camera.distance = 1.8;
-    g_camera.azimuth = 145.0;
-    g_camera.elevation = -25.0;
-    g_camera.lookat[0] = -0.25;
-    g_camera.lookat[1] = 0.05;
-    g_camera.lookat[2] = 0.30;
+    ur5vis::InitializeCamera(model.get(), &g_camera);
 
     mjv_makeScene(model.get(), &g_scene, 4000);
     mjr_makeContext(model.get(), &context, mjFONTSCALE_150);
+    g_interactive_camera.Attach(window, model.get(), &g_scene, &g_camera);
 
     glfwSetKeyCallback(window, Keyboard);
-    glfwSetCursorPosCallback(window, MouseMove);
-    glfwSetMouseButtonCallback(window, MouseButton);
-    glfwSetScrollCallback(window, Scroll);
 
     std::cout << "Loaded scene: " << scene_path << '\n';
     std::cout << "Loaded path: " << path_file << " (" << replay.path.size() << " frames)\n";
@@ -425,9 +329,9 @@ int main(int argc, char** argv) {
 
       mjrRect viewport = {0, 0, 0, 0};
       glfwGetFramebufferSize(window, &viewport.width, &viewport.height);
-      ApplyRobotGeometryMode(replay);
+      ur5vis::ApplyRobotGeometryMode(&g_option, replay.show_collision_model);
       mjv_updateScene(model.get(), data.get(), &g_option, nullptr, &g_camera, mjCAT_ALL, &g_scene);
-      AddToolPathMarkers(&g_scene, replay.tool_path, replay.frame);
+      ur5vis::AddToolPathMarkers(&g_scene, replay.tool_path, &replay.tool_path[replay.frame]);
       mjr_render(viewport, &g_scene, &context);
       RenderOverlay(viewport, replay, &context);
 

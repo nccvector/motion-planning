@@ -25,6 +25,8 @@
 #include <utility>
 #include <vector>
 
+#include "ur5_visualization.hpp"
+
 namespace ob = ompl::base;
 namespace og = ompl::geometric;
 
@@ -457,20 +459,15 @@ class LivePidViewer {
 
     mjv_defaultCamera(&camera_);
     mjv_defaultOption(&option_);
-    ApplyRobotGeometryMode();
+    ur5vis::ApplyRobotGeometryMode(&option_, show_collision_model_);
     mjv_defaultScene(&mjv_scene_);
     mjr_defaultContext(&context_);
 
-    mjv_defaultFreeCamera(scene_.model(), &camera_);
-    camera_.distance = 1.8;
-    camera_.azimuth = 145.0;
-    camera_.elevation = -25.0;
-    camera_.lookat[0] = -0.25;
-    camera_.lookat[1] = 0.05;
-    camera_.lookat[2] = 0.30;
+    ur5vis::InitializeCamera(scene_.model(), &camera_);
 
     mjv_makeScene(scene_.model(), &mjv_scene_, 4000);
     mjr_makeContext(scene_.model(), &context_, mjFONTSCALE_150);
+    interactive_camera_.Attach(window_, scene_.model(), &mjv_scene_, &camera_);
     start_wall_time_ = Clock::now();
     active_ = true;
   }
@@ -518,10 +515,11 @@ class LivePidViewer {
 
     mjrRect viewport = {0, 0, 0, 0};
     glfwGetFramebufferSize(window_, &viewport.width, &viewport.height);
-    ApplyRobotGeometryMode();
+    ur5vis::ApplyRobotGeometryMode(&option_, show_collision_model_);
     mjv_updateScene(scene_.model(), scene_.data(), &option_, nullptr, &camera_, mjCAT_ALL,
                     &mjv_scene_);
-    AddToolPathMarkers(target_index);
+    const auto current_tool = scene_.ToolPosition();
+    ur5vis::AddToolPathMarkers(&mjv_scene_, planned_tool_path_, &current_tool);
     mjr_render(viewport, &mjv_scene_, &context_);
     RenderOverlay(viewport, target_index, step);
     glfwSwapBuffers(window_);
@@ -531,44 +529,6 @@ class LivePidViewer {
  private:
   using Clock = std::chrono::steady_clock;
 
-  void ApplyRobotGeometryMode() {
-    constexpr int kRobotVisualGroup = 2;
-    constexpr int kRobotCollisionGroup = 3;
-    option_.geomgroup[kRobotVisualGroup] = show_collision_model_ ? 0 : 1;
-    option_.geomgroup[kRobotCollisionGroup] = show_collision_model_ ? 1 : 0;
-  }
-
-  void AddToolPathMarkers(std::size_t target_index) {
-    constexpr mjtNum kIdentity[9] = {1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0};
-    constexpr float kPathRgba[4] = {0.1F, 0.65F, 1.0F, 0.38F};
-    constexpr float kCurrentRgba[4] = {1.0F, 0.85F, 0.1F, 1.0F};
-
-    const std::size_t stride = std::max<std::size_t>(1, planned_tool_path_.size() / 120);
-    for (std::size_t i = 0; i < planned_tool_path_.size(); i += stride) {
-      if (mjv_scene_.ngeom >= mjv_scene_.maxgeom) {
-        return;
-      }
-      const auto& point = planned_tool_path_[i];
-      const mjtNum size[3] = {0.008, 0.0, 0.0};
-      const mjtNum pos[3] = {point[0], point[1], point[2]};
-      mjv_initGeom(&mjv_scene_.geoms[mjv_scene_.ngeom], mjGEOM_SPHERE, size, pos, kIdentity,
-                   kPathRgba);
-      mjv_scene_.geoms[mjv_scene_.ngeom].category = mjCAT_DECOR;
-      ++mjv_scene_.ngeom;
-    }
-
-    if (mjv_scene_.ngeom < mjv_scene_.maxgeom) {
-      const auto point = scene_.ToolPosition();
-      const mjtNum size[3] = {0.018, 0.0, 0.0};
-      const mjtNum pos[3] = {point[0], point[1], point[2]};
-      mjv_initGeom(&mjv_scene_.geoms[mjv_scene_.ngeom], mjGEOM_SPHERE, size, pos, kIdentity,
-                   kCurrentRgba);
-      mjv_scene_.geoms[mjv_scene_.ngeom].category = mjCAT_DECOR;
-      ++mjv_scene_.ngeom;
-    }
-    (void)target_index;
-  }
-
   void RenderOverlay(mjrRect viewport, std::size_t target_index, int step) {
     std::ostringstream left;
     left << "UR5e live PID execution\n"
@@ -576,7 +536,7 @@ class LivePidViewer {
          << step << " | sim " << std::fixed << std::setprecision(2) << scene_.data()->time
          << " s | robot view " << (show_collision_model_ ? "collision" : "mesh");
 
-    constexpr const char* right = "C: mesh/collision\nEsc: close viewer";
+    constexpr const char* right = "C: mesh/collision\nMouse: rotate/pan/zoom\nEsc: close viewer";
     mjr_overlay(mjFONT_NORMAL, mjGRID_TOPLEFT, viewport, left.str().c_str(), right, &context_);
   }
 
@@ -587,6 +547,7 @@ class LivePidViewer {
   mjvOption option_{};
   mjvScene mjv_scene_{};
   mjrContext context_{};
+  ur5vis::InteractiveCamera interactive_camera_;
   Clock::time_point start_wall_time_{};
   bool active_ = false;
   bool show_collision_model_ = true;

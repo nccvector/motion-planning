@@ -140,6 +140,9 @@ Viewer controls:
 - `Esc`: close
 - Mouse drag/scroll: rotate, pan, and zoom camera
 
+The live PID viewer and CSV replayer share the same camera defaults and mouse
+drag/scroll controls.
+
 Successful validation includes:
 
 ```text

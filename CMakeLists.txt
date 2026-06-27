@@ -112,6 +112,7 @@ endif()
 
 add_executable(ur5_clutter_plan
   src/ur5_clutter_plan.cpp
+  src/ur5_visualization.hpp
 )
 target_compile_features(ur5_clutter_plan PRIVATE cxx_std_23)
 target_link_libraries(ur5_clutter_plan
@@ -127,6 +128,7 @@ target_compile_definitions(ur5_clutter_plan
 
 add_executable(ur5_path_replay
   src/ur5_path_replay.cpp
+  src/ur5_visualization.hpp
 )
 target_compile_features(ur5_path_replay PRIVATE cxx_std_23)
 target_link_libraries(ur5_path_replay

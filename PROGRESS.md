@@ -301,6 +301,12 @@
     loaded the generated trace successfully,
   - dense planned-path diagnostic found 0 contacts, 0 negative robot-ring
     distances, and closest red-ring distance `0.019226 m`.
+- Fixed live-viewer camera interaction:
+  - root cause: `ur5_path_replay` installed MuJoCo mouse/scroll camera callbacks,
+    but the live PID viewer only polled keyboard keys,
+  - added `src/ur5_visualization.hpp` for shared camera defaults, mesh/collision
+    group toggling, tool-path markers, and mouse drag/scroll camera callbacks,
+  - both `ur5_clutter_plan` and `ur5_path_replay` now use the same viewer helper.
 
 ## Next
 
