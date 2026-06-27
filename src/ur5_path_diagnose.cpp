@@ -180,7 +180,8 @@ bool IsRedRingGeom(const mjModel* model, int geom_id) {
   }
   const std::string_view geom_name{name};
   return geom_name == "ring_left_bar" || geom_name == "ring_right_bar" ||
-         geom_name == "ring_top_bar" || geom_name == "ring_bottom_bar";
+         geom_name == "ring_top_bar" || geom_name == "ring_bottom_bar" ||
+         geom_name.starts_with("ring_shelf_");
 }
 
 bool IsRobotCollisionGeom(const mjModel* model, int geom_id) {

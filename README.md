@@ -14,7 +14,8 @@ This project is intentionally separate from `projects/ros2-learning`.
 - Eigen and the required Boost components from CMake `FetchContent`, because
   OMPL needs them.
 - A C++23 executable, `ur5_clutter_plan`, that:
-  - loads an official Menagerie UR5e scene wrapped with local shelf/ring clutter,
+  - loads an official Menagerie UR5e scene wrapped with local shelf and tight
+    red-ring window clutter,
   - checks home and goal validity,
   - plans a joint-space path with OMPL `RRTConnect`,
   - shortcut-simplifies the geometric path into hard knots,
@@ -32,7 +33,8 @@ This project is intentionally separate from `projects/ros2-learning`.
   - shows the tool path and current tool position in a native MuJoCo/GLFW window.
 - A C++23 executable, `ur5_goal_loop_demo`, that:
   - cycles through 20 Monte Carlo-selected valid joint-space goals,
-  - alternates between 10 red-ring approach-side goals and 10 shelf-side goals,
+  - alternates between 10 red-ring approach-side goals and 10 shelf-side window
+    goals split across the low/high copied shelf windows,
   - plans each next segment on a separate planning scene/thread while the viewer
     stays responsive,
   - retries failed planning segments up to 5 times,
@@ -42,7 +44,7 @@ This project is intentionally separate from `projects/ros2-learning`.
 - A C++23 executable, `ur5_goal_monte_carlo`, that:
   - runs deterministic Monte Carlo exploration of valid states in the current
     scene,
-  - ranks approach-side and shelf-side goals,
+  - ranks primary-ring approach-side goals and shelf-window goals,
   - prints a C++ initializer for an alternating 20-goal loop list.
 - A C++23 executable, `ur5_path_diagnose`, that:
   - checks robot collision geometry against the red ring along a saved CSV path,
@@ -116,6 +118,10 @@ Regenerate Monte Carlo candidates:
 ```bash
 ./build/ur5_goal_monte_carlo
 ```
+
+The current scene uses a tightened primary red ring and two copied red shelf
+windows. The loop goal list is checked to keep 10 approach-side goals and 10
+shelf-side goals, split as 5 low-window and 5 high-window shelf poses.
 
 The planner rejects actual obstacle contacts. OMPL state validity and final path
 acceptance use a 1.5 cm clearance margin between robot collision geometry and

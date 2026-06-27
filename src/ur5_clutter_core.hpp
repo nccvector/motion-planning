@@ -37,9 +37,11 @@ namespace {
 constexpr int kDof = 6;
 constexpr double kPi = 3.14159265358979323846;
 constexpr double kRingPlaneX = -0.45;
+constexpr double kShelfWindowPlaneX = -0.72;
 constexpr double kRingCenterZ = 0.36;
-constexpr double kRingHalfOpeningY = 0.560;
-constexpr double kRingHalfOpeningZ = 0.400;
+constexpr double kRingHalfOpeningY = 0.235;
+constexpr double kRingHalfOpeningZ = 0.170;
+constexpr double kWindowPlaneTolerance = 0.050;
 // Plan with cushion; validate with the hard floor we actually require.
 constexpr double kRequiredObstacleClearance = 0.010;
 constexpr double kOmplObstacleClearance = 0.015;
@@ -60,6 +62,26 @@ constexpr double kControlHz = 90.0;
 constexpr double kControlPeriodSeconds = 1.0 / kControlHz;
 
 using JointArray = std::array<double, kDof>;
+
+struct WindowSpec {
+  const char* name;
+  double plane_x;
+  double center_y;
+  double center_z;
+  double half_opening_y;
+  double half_opening_z;
+};
+
+constexpr std::array<WindowSpec, 3> kWindowSpecs = {{
+    {"primary_ring", kRingPlaneX, 0.0, kRingCenterZ, kRingHalfOpeningY, kRingHalfOpeningZ},
+    {"shelf_low_window", kShelfWindowPlaneX, -0.18, 0.25, kRingHalfOpeningY, kRingHalfOpeningZ},
+    {"shelf_high_window", kShelfWindowPlaneX, -0.18, 0.40, kRingHalfOpeningY, kRingHalfOpeningZ},
+}};
+
+constexpr std::array<double, 2> kWindowLayerPlanes = {{
+    kRingPlaneX,
+    kShelfWindowPlaneX,
+}};
 
 struct C2SplineResult {
   std::vector<JointArray> path;
@@ -109,37 +131,37 @@ const RobotNames kSimpleUr5LikeNames = {
     "tool0"};
 
 const std::array<JointArray, 10> kHomeCandidates = {{
-    {-1.5708, -1.5708, 1.5708, -1.5708, -1.5708, 0.0},
-    {-1.20, -1.70, 1.75, -1.60, -1.5708, 0.0},
-    {-0.85, -1.70, 1.80, -1.65, -1.5708, 0.0},
-    {-0.40, -1.60, 1.70, -1.65, -1.5708, 0.0},
-    {0.0, -1.60, 1.70, -1.65, -1.5708, 0.0},
-    {0.0, -1.60, 2.40, -0.70, 0.25, 0.0},
-    {0.0, -1.45, 2.30, -0.75, 0.25, 0.0},
-    {0.0, -1.30, 2.15, -0.75, 0.25, 0.0},
-    {0.15, -1.50, 2.35, -0.75, 0.20, 0.0},
-    {-0.15, -1.50, 2.35, -0.75, 0.20, 0.0},
+    {-0.590469, -1.789239, 2.160045, -0.792644, 0.215248, -0.075016},
+    {-0.666903, -1.870113, 2.179305, -0.472320, 0.275371, 0.379068},
+    {-0.525574, -1.736350, 2.037490, -0.546228, -0.395963, 0.083717},
+    {-0.478010, -1.950792, 2.415944, -1.129555, 0.534752, 0.087078},
+    {-0.209172, -1.821361, 2.195852, -0.716527, 0.619420, -0.058810},
+    {-0.761287, -1.959243, 2.244084, -1.080483, -0.040121, 0.341237},
+    {-0.168666, -1.749368, 2.065366, -0.485767, 0.074824, -0.141946},
+    {-0.136299, -2.010973, 2.297995, -0.715362, 0.221923, 0.251150},
+    {-0.250164, -1.893295, 2.204828, -0.970754, -0.210796, -0.039012},
+    {-0.446430, -1.642830, 2.137893, -0.228440, 0.527161, 0.051728},
 }};
 
 const std::array<JointArray, 18> kGoalCandidates = {{
-    {0.0, -0.45, 0.95, -0.75, -1.5708, 0.0},
-    {0.0, -0.70, 1.20, -0.65, -1.5708, 0.0},
-    {0.0, -0.85, 1.35, -0.55, -1.5708, 0.0},
-    {0.12, -0.82, 1.32, -0.55, -1.5708, 0.0},
-    {-0.12, -0.82, 1.32, -0.55, -1.5708, 0.0},
-    {-0.35, -1.05, 1.55, -1.05, -1.5708, 0.0},
-    {-0.55, -1.05, 1.55, -1.05, -1.5708, 0.0},
-    {-0.80, -1.05, 1.60, -1.10, -1.5708, 0.0},
-    {-1.05, -1.00, 1.55, -1.10, -1.5708, 0.0},
-    {-1.25, -0.95, 1.45, -1.05, -1.5708, 0.0},
-    {-1.45, -0.95, 1.45, -1.05, -1.5708, 0.0},
-    {0.0, -0.45, 0.95, -0.75, 0.20, 0.0},
-    {0.0, -0.70, 1.20, -0.65, 0.20, 0.0},
-    {0.0, -0.85, 1.35, -0.55, 0.20, 0.0},
-    {0.12, -0.82, 1.32, -0.55, 0.18, 0.0},
-    {-0.12, -0.82, 1.32, -0.55, 0.18, 0.0},
-    {0.0, -0.95, 1.45, -0.50, 0.20, 0.0},
-    {-0.60, -0.95, 1.45, -0.65, 0.20, 0.0},
+    {-0.066236, -0.919917, 1.220043, -0.877790, -0.265118, 0.080547},
+    {-0.037932, -1.006641, 1.255414, -0.865408, 0.065840, 0.239123},
+    {-0.101850, -0.976174, 1.282816, -0.992021, 0.000102, 0.577577},
+    {-0.069395, -1.014954, 1.279989, -0.681565, 0.162805, -0.334207},
+    {-0.025488, -0.992668, 1.380861, -0.933884, 0.277461, -0.228169},
+    {-0.059865, -1.039368, 1.346909, -0.913560, 0.556614, -0.000604},
+    {0.022854, -0.862817, 1.198943, -1.393905, 0.167542, 0.002161},
+    {0.057985, -0.753526, 1.018779, -1.381314, 0.348522, -0.108451},
+    {-0.085033, -0.992605, 1.380634, -0.662850, 0.538806, 0.195147},
+    {-0.257410, -1.055477, 1.323687, -0.579905, 0.519991, 0.497981},
+    {-0.066236, -0.919917, 1.220043, -0.877790, -0.265118, 0.080547},
+    {-0.037932, -1.006641, 1.255414, -0.865408, 0.065840, 0.239123},
+    {-0.101850, -0.976174, 1.282816, -0.992021, 0.000102, 0.577577},
+    {-0.069395, -1.014954, 1.279989, -0.681565, 0.162805, -0.334207},
+    {-0.025488, -0.992668, 1.380861, -0.933884, 0.277461, -0.228169},
+    {-0.059865, -1.039368, 1.346909, -0.913560, 0.556614, -0.000604},
+    {0.022854, -0.862817, 1.198943, -1.393905, 0.167542, 0.002161},
+    {0.057985, -0.753526, 1.018779, -1.381314, 0.348522, -0.108451},
 }};
 
 struct MjModelDeleter {
@@ -934,18 +956,79 @@ int JointPathClearanceViolationCount(Ur5Scene& scene,
   return violations;
 }
 
-bool PathPassesRingOpening(Ur5Scene& scene, const std::vector<JointArray>& path) {
+bool ToolAlignedWithWindow(const std::array<double, 3>& tool,
+                           const WindowSpec& window,
+                           double scale = 1.0) {
+  return std::abs(tool[1] - window.center_y) < window.half_opening_y * scale &&
+         std::abs(tool[2] - window.center_z) < window.half_opening_z * scale;
+}
+
+bool ToolInsideWindow(const std::array<double, 3>& tool, const WindowSpec& window) {
+  return std::abs(tool[0] - window.plane_x) < kWindowPlaneTolerance &&
+         ToolAlignedWithWindow(tool, window);
+}
+
+bool ToolPathCrossesPlane(const std::vector<std::array<double, 3>>& tools, double plane_x) {
+  if (tools.empty()) {
+    return false;
+  }
+  double min_x = tools.front()[0];
+  double max_x = tools.front()[0];
+  for (const auto& tool : tools) {
+    min_x = std::min(min_x, tool[0]);
+    max_x = std::max(max_x, tool[0]);
+  }
+  return min_x <= plane_x + kWindowPlaneTolerance && max_x >= plane_x - kWindowPlaneTolerance;
+}
+
+std::vector<std::array<double, 3>> ComputeToolPathSamples(Ur5Scene& scene,
+                                                          const std::vector<JointArray>& path) {
+  std::vector<std::array<double, 3>> tools;
+  tools.reserve(path.size());
   for (const JointArray& q : path) {
     scene.SetConfiguration(q);
-    const auto tool = scene.ToolPosition();
-    const bool near_ring_plane = std::abs(tool[0] - kRingPlaneX) < 0.05;
-    const bool inside_opening = std::abs(tool[1]) < kRingHalfOpeningY &&
-                                std::abs(tool[2] - kRingCenterZ) < kRingHalfOpeningZ;
-    if (near_ring_plane && inside_opening) {
-      return true;
+    tools.push_back(scene.ToolPosition());
+  }
+  return tools;
+}
+
+std::array<int, kWindowSpecs.size()> WindowHitCounts(
+    const std::vector<std::array<double, 3>>& tools) {
+  std::array<int, kWindowSpecs.size()> counts{};
+  for (const auto& tool : tools) {
+    for (std::size_t i = 0; i < kWindowSpecs.size(); ++i) {
+      if (ToolInsideWindow(tool, kWindowSpecs[i])) {
+        ++counts[i];
+      }
     }
   }
-  return false;
+  return counts;
+}
+
+std::array<int, kWindowSpecs.size()> WindowHitCounts(Ur5Scene& scene,
+                                                     const std::vector<JointArray>& path) {
+  return WindowHitCounts(ComputeToolPathSamples(scene, path));
+}
+
+bool PathPassesRingOpening(Ur5Scene& scene, const std::vector<JointArray>& path) {
+  const std::vector<std::array<double, 3>> tools = ComputeToolPathSamples(scene, path);
+  const std::array<int, kWindowSpecs.size()> counts = WindowHitCounts(tools);
+
+  for (const double layer_plane : kWindowLayerPlanes) {
+    if (!ToolPathCrossesPlane(tools, layer_plane)) {
+      continue;
+    }
+    bool layer_has_hit = false;
+    for (std::size_t i = 0; i < kWindowSpecs.size(); ++i) {
+      if (std::abs(kWindowSpecs[i].plane_x - layer_plane) < 1e-9 && counts[i] > 0) {
+        layer_has_hit = true;
+      }
+    }
+    if (!layer_has_hit) {
+      return false;
+    }
+  }
+  return true;
 }
 
 C2AttemptResult TryC2Spline(Ur5Scene& scene,
@@ -1018,7 +1101,7 @@ JointArray SelectHome(Ur5Scene& scene) {
     const auto contacts = scene.ObstacleContactPairs(candidate);
     const auto clearance_violations =
         scene.ObstacleClearancePairs(candidate, kPlanningObstacleClearance);
-    const bool before_ring = tool[0] > kRingPlaneX + 0.08;
+    const bool before_ring = tool[0] > kRingPlaneX + 0.04;
     const bool valid = contacts.empty() && clearance_violations.empty() && before_ring;
     std::cout << "Home candidate " << i << " tool position: [" << std::fixed
               << std::setprecision(3) << tool[0] << ", " << tool[1] << ", " << tool[2]
@@ -1051,9 +1134,17 @@ JointArray SelectGoal(Ur5Scene& scene) {
     const auto contacts = scene.ObstacleContactPairs(candidate);
     const auto clearance_violations =
         scene.ObstacleClearancePairs(candidate, kPlanningObstacleClearance);
-    const bool after_ring = tool[0] < kRingPlaneX - 0.12;
+    bool shelf_window_aligned = false;
+    for (const WindowSpec& window : kWindowSpecs) {
+      if (std::abs(window.plane_x - kShelfWindowPlaneX) < 1e-9 &&
+          ToolAlignedWithWindow(tool, window, 1.15)) {
+        shelf_window_aligned = true;
+      }
+    }
+    const bool after_ring = tool[0] < kShelfWindowPlaneX + kWindowPlaneTolerance;
     const bool shelf_height = tool[2] > 0.10 && tool[2] < 0.65;
-    const bool valid = contacts.empty() && clearance_violations.empty() && after_ring && shelf_height;
+    const bool valid = contacts.empty() && clearance_violations.empty() && after_ring &&
+                       shelf_height && shelf_window_aligned;
     std::cout << "Goal candidate " << i << " tool position: [" << std::fixed
               << std::setprecision(3) << tool[0] << ", " << tool[1] << ", " << tool[2]
               << "], valid=" << std::boolalpha << valid << '\n';
@@ -1062,6 +1153,9 @@ JointArray SelectGoal(Ur5Scene& scene) {
     }
     if (!shelf_height) {
       std::cout << "  rejected: tool is outside the shelf height band\n";
+    }
+    if (!shelf_window_aligned) {
+      std::cout << "  rejected: tool is not aligned with a shelf window opening\n";
     }
     for (const auto& contact : contacts) {
       std::cout << "  rejected obstacle contact: " << contact << '\n';
@@ -1507,28 +1601,39 @@ void ExecutePath(const std::filesystem::path& trace_file,
 }
 
 void ReportRingPassage(Ur5Scene& scene, const std::vector<JointArray>& path) {
-  int plane_samples = 0;
-  int opening_samples = 0;
-  for (const JointArray& q : path) {
-    scene.SetConfiguration(q);
-    const auto tool = scene.ToolPosition();
-    const bool near_ring_plane = std::abs(tool[0] - kRingPlaneX) < 0.05;
-    const bool inside_opening = std::abs(tool[1]) < kRingHalfOpeningY &&
-                                std::abs(tool[2] - kRingCenterZ) < kRingHalfOpeningZ;
-    if (near_ring_plane) {
-      ++plane_samples;
-      if (inside_opening) {
-        ++opening_samples;
+  const std::vector<std::array<double, 3>> tools = ComputeToolPathSamples(scene, path);
+  const std::array<int, kWindowSpecs.size()> counts = WindowHitCounts(tools);
+
+  for (const double layer_plane : kWindowLayerPlanes) {
+    int plane_samples = 0;
+    for (const auto& tool : tools) {
+      if (std::abs(tool[0] - layer_plane) < kWindowPlaneTolerance) {
+        ++plane_samples;
       }
     }
+
+    int layer_opening_samples = 0;
+    for (std::size_t i = 0; i < kWindowSpecs.size(); ++i) {
+      if (std::abs(kWindowSpecs[i].plane_x - layer_plane) < 1e-9) {
+        layer_opening_samples += counts[i];
+      }
+    }
+
+    std::cout << "Window layer x=" << layer_plane << " plane samples: " << plane_samples
+              << '\n';
+    std::cout << "Window layer x=" << layer_plane
+              << " opening samples: " << layer_opening_samples << '\n';
+
+    if (ToolPathCrossesPlane(tools, layer_plane) && plane_samples == 0) {
+      throw std::runtime_error("Path crossed a window layer but had no layer-plane samples");
+    }
+    if (ToolPathCrossesPlane(tools, layer_plane) && layer_opening_samples == 0) {
+      throw std::runtime_error("Path crossed a window layer but not through an opening");
+    }
   }
-  std::cout << "Ring-plane path samples: " << plane_samples << '\n';
-  std::cout << "Ring-opening path samples: " << opening_samples << '\n';
-  if (plane_samples == 0) {
-    throw std::runtime_error("Path did not pass through the ring plane");
-  }
-  if (opening_samples == 0) {
-    throw std::runtime_error("Path crossed the ring plane but not through the opening");
+
+  for (std::size_t i = 0; i < kWindowSpecs.size(); ++i) {
+    std::cout << "Window " << kWindowSpecs[i].name << " path samples: " << counts[i] << '\n';
   }
 }
 

@@ -16,6 +16,7 @@ struct Candidate {
   JointArray q{};
   std::array<double, 3> tool{};
   double score = 0.0;
+  std::size_t window_index = 0;
 };
 
 constexpr std::array<JointArray, 4> kNeedleLoopAnchors = {{
@@ -39,39 +40,58 @@ double NearestAnchorDistance(const JointArray& q, const std::array<JointArray, N
   return best;
 }
 
-double NeedleSideScore(const std::array<double, 3>& tool) {
-  const double desired_x = kRingPlaneX + 0.22;
-  const double desired_y = 0.0;
-  const double desired_z = kRingCenterZ;
-  const double opening_y_margin = kRingHalfOpeningY - std::abs(tool[1]);
-  const double opening_z_margin = kRingHalfOpeningZ - std::abs(tool[2] - kRingCenterZ);
-  const double shelf_height_bonus = tool[2] > 0.12 && tool[2] < 0.62 ? 0.3 : 0.0;
-  return 3.0 * opening_y_margin + 3.0 * opening_z_margin + shelf_height_bonus -
-         1.2 * std::abs(tool[0] - desired_x) - 0.4 * std::abs(tool[1] - desired_y) -
-         0.5 * std::abs(tool[2] - desired_z);
+double WindowAlignmentScore(const std::array<double, 3>& tool, const WindowSpec& window) {
+  const double opening_y_margin = window.half_opening_y - std::abs(tool[1] - window.center_y);
+  const double opening_z_margin = window.half_opening_z - std::abs(tool[2] - window.center_z);
+  return 3.0 * opening_y_margin + 3.0 * opening_z_margin;
 }
 
-double ShelfSideScore(const std::array<double, 3>& tool) {
-  const double desired_x = -0.68;
-  const double desired_y = -0.23;
-  const double desired_z = 0.20;
-  const double shelf_reach_bonus = tool[0] < -0.60 && tool[2] > 0.10 && tool[2] < 0.40 ? 1.0 : 0.0;
-  const double opening_y_margin = kRingHalfOpeningY - std::abs(tool[1]);
-  const double opening_z_margin = kRingHalfOpeningZ - std::abs(tool[2] - kRingCenterZ);
-  return shelf_reach_bonus + 1.5 * opening_y_margin + 1.0 * opening_z_margin -
-         1.8 * std::abs(tool[0] - desired_x) - 0.9 * std::abs(tool[1] - desired_y) -
-         0.8 * std::abs(tool[2] - desired_z);
+double NeedleSideScore(const std::array<double, 3>& tool) {
+  const WindowSpec& window = kWindowSpecs[0];
+  const double desired_x = window.plane_x + 0.16;
+  const double shelf_height_bonus = tool[2] > 0.12 && tool[2] < 0.62 ? 0.3 : 0.0;
+  return WindowAlignmentScore(tool, window) + shelf_height_bonus -
+         1.2 * std::abs(tool[0] - desired_x);
+}
+
+double ShelfSideScore(const std::array<double, 3>& tool, const WindowSpec& window) {
+  const double desired_x = kShelfWindowPlaneX;
+  const double shelf_reach_bonus =
+      tool[0] < kShelfWindowPlaneX + kWindowPlaneTolerance ? 1.4 : 0.0;
+  return shelf_reach_bonus + WindowAlignmentScore(tool, window) -
+         1.0 * std::abs(tool[0] - desired_x);
 }
 
 bool IsNeedleSideGoal(const std::array<double, 3>& tool) {
-  return tool[0] > kRingPlaneX + 0.08 && std::abs(tool[1]) < kRingHalfOpeningY * 0.85 &&
-         std::abs(tool[2] - kRingCenterZ) < kRingHalfOpeningZ * 0.85 && tool[2] > 0.10 &&
-         tool[2] < 0.70;
+  return tool[0] > kRingPlaneX + 0.04 && ToolAlignedWithWindow(tool, kWindowSpecs[0], 1.10) &&
+         tool[2] > 0.10 && tool[2] < 0.70;
+}
+
+std::optional<std::size_t> ShelfWindowIndexForTool(const std::array<double, 3>& tool) {
+  std::optional<std::size_t> best_index;
+  double best_distance = std::numeric_limits<double>::infinity();
+  for (std::size_t i = 0; i < kWindowSpecs.size(); ++i) {
+    const WindowSpec& window = kWindowSpecs[i];
+    if (std::abs(window.plane_x - kShelfWindowPlaneX) > 1e-9) {
+      continue;
+    }
+    if (!ToolAlignedWithWindow(tool, window, 1.15)) {
+      continue;
+    }
+    const double distance = std::abs(tool[1] - window.center_y) +
+                            std::abs(tool[2] - window.center_z);
+    if (distance < best_distance) {
+      best_distance = distance;
+      best_index = i;
+    }
+  }
+  return best_index;
 }
 
 bool IsShelfSideGoal(const std::array<double, 3>& tool) {
-  return tool[0] < kRingPlaneX - 0.12 && std::abs(tool[1]) < kRingHalfOpeningY * 0.95 &&
-         tool[2] > 0.08 && tool[2] < 0.62;
+  return tool[0] < kShelfWindowPlaneX + kWindowPlaneTolerance && tool[2] > 0.08 &&
+         tool[2] < 0.66 &&
+         ShelfWindowIndexForTool(tool).has_value();
 }
 
 std::vector<Candidate> SelectDiverse(std::vector<Candidate> candidates, int count) {
@@ -102,7 +122,8 @@ std::vector<Candidate> SelectDiverse(std::vector<Candidate> candidates, int coun
 void PrintCandidate(const Candidate& candidate, int index, std::string_view label) {
   std::cout << label << ' ' << index << " score=" << std::fixed << std::setprecision(3)
             << candidate.score << " tool=[" << candidate.tool[0] << ", " << candidate.tool[1]
-            << ", " << candidate.tool[2] << "] q={";
+            << ", " << candidate.tool[2] << "] window="
+            << kWindowSpecs[candidate.window_index].name << " q={";
   for (int i = 0; i < kDof; ++i) {
     if (i > 0) {
       std::cout << ", ";
@@ -113,12 +134,13 @@ void PrintCandidate(const Candidate& candidate, int index, std::string_view labe
 }
 
 void PrintCppInitializer(const std::vector<Candidate>& needle_side,
-                         const std::vector<Candidate>& shelf_side) {
+                         const std::array<std::vector<Candidate>, 2>& shelf_windows) {
   std::cout << "\nC++ alternating loop-goal initializer:\n";
   std::cout << "std::vector<JointArray> BuildLoopGoals() {\n";
   std::cout << "  return {\n";
   for (int i = 0; i < kKeepPerSide; ++i) {
-    const Candidate* pair[2] = {&needle_side[i], &shelf_side[i]};
+    const std::vector<Candidate>& shelf_side = shelf_windows[i % 2];
+    const Candidate* pair[2] = {&needle_side[i], &shelf_side[i / 2]};
     for (const Candidate* candidate : pair) {
       std::cout << "      {";
       for (int j = 0; j < kDof; ++j) {
@@ -194,7 +216,7 @@ int main(int argc, char** argv) {
     std::uniform_int_distribution<std::size_t> home_anchor(0, kHomeCandidates.size() - 1);
     std::uniform_int_distribution<std::size_t> goal_anchor(0, kGoalCandidates.size() - 1);
     std::vector<Candidate> needle_side;
-    std::vector<Candidate> shelf_side;
+    std::array<std::vector<Candidate>, 2> shelf_windows;
     int valid = 0;
     for (int sample = 0; sample < samples; ++sample) {
       JointArray q{};
@@ -224,35 +246,55 @@ int main(int argc, char** argv) {
       const auto tool = scene.ToolPosition();
       if (IsNeedleSideGoal(tool)) {
         needle_side.push_back(
-            {q, tool, NeedleSideScore(tool) - 0.8 * NearestAnchorDistance(q, kNeedleLoopAnchors)});
+            {q,
+             tool,
+             NeedleSideScore(tool) - 0.8 * NearestAnchorDistance(q, kNeedleLoopAnchors),
+             0});
       } else if (IsShelfSideGoal(tool)) {
-        shelf_side.push_back(
-            {q, tool, ShelfSideScore(tool) - 0.8 * NearestAnchorDistance(q, kShelfLoopAnchors)});
+        const std::optional<std::size_t> shelf_window_index = ShelfWindowIndexForTool(tool);
+        if (!shelf_window_index.has_value()) {
+          continue;
+        }
+        const std::size_t shelf_bucket = *shelf_window_index == 1 ? 0 : 1;
+        shelf_windows[shelf_bucket].push_back(
+            {q,
+             tool,
+             ShelfSideScore(tool, kWindowSpecs[*shelf_window_index]) -
+                 0.8 * NearestAnchorDistance(q, kShelfLoopAnchors),
+             *shelf_window_index});
       }
     }
 
     const std::vector<Candidate> selected_needle = SelectDiverse(needle_side, kKeepPerSide);
-    const std::vector<Candidate> selected_shelf = SelectDiverse(shelf_side, kKeepPerSide);
+    std::array<std::vector<Candidate>, 2> selected_shelf_windows = {{
+        SelectDiverse(shelf_windows[0], kKeepPerSide / 2),
+        SelectDiverse(shelf_windows[1], kKeepPerSide / 2),
+    }};
 
     std::cout << "Scene: " << scene_path << '\n';
     std::cout << "Seed: " << seed << '\n';
     std::cout << "Samples: " << samples << '\n';
     std::cout << "Valid collision-clear states: " << valid << '\n';
     std::cout << "Needle-side candidates: " << needle_side.size() << '\n';
-    std::cout << "Shelf-side candidates: " << shelf_side.size() << '\n';
+    std::cout << "Shelf-low candidates: " << shelf_windows[0].size() << '\n';
+    std::cout << "Shelf-high candidates: " << shelf_windows[1].size() << '\n';
     std::cout << "Selected needle-side goals: " << selected_needle.size() << '\n';
-    std::cout << "Selected shelf-side goals: " << selected_shelf.size() << '\n';
+    std::cout << "Selected shelf-low goals: " << selected_shelf_windows[0].size() << '\n';
+    std::cout << "Selected shelf-high goals: " << selected_shelf_windows[1].size() << '\n';
 
-    if (selected_needle.size() < kKeepPerSide || selected_shelf.size() < kKeepPerSide) {
+    if (selected_needle.size() < kKeepPerSide ||
+        selected_shelf_windows[0].size() < kKeepPerSide / 2 ||
+        selected_shelf_windows[1].size() < kKeepPerSide / 2) {
       std::cerr << "error: not enough valid goals; increase --samples\n";
       return 1;
     }
 
     for (int i = 0; i < kKeepPerSide; ++i) {
       PrintCandidate(selected_needle[i], i + 1, "needle");
-      PrintCandidate(selected_shelf[i], i + 1, "shelf ");
+      const std::vector<Candidate>& shelf_side = selected_shelf_windows[i % 2];
+      PrintCandidate(shelf_side[i / 2], i + 1, i % 2 == 0 ? "shelf-low " : "shelf-high");
     }
-    PrintCppInitializer(selected_needle, selected_shelf);
+    PrintCppInitializer(selected_needle, selected_shelf_windows);
   } catch (const std::exception& e) {
     std::cerr << "error: " << e.what() << '\n';
     return 1;

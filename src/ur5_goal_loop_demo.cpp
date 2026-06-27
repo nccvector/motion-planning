@@ -1,6 +1,7 @@
 #include "ur5_clutter_core.hpp"
 
 #include <future>
+#include <limits>
 #include <mutex>
 #include <tuple>
 
@@ -44,13 +45,33 @@ std::string FormatToolPosition(Ur5Scene& scene, const JointArray& q) {
 }
 
 std::string GoalSideLabel(const std::array<double, 3>& tool) {
-  if (tool[0] > kRingPlaneX + 0.08) {
+  if (tool[0] > kRingPlaneX + 0.04) {
     return "needle-side";
   }
-  if (tool[0] < kRingPlaneX - 0.12) {
+  if (tool[0] < kShelfWindowPlaneX + kWindowPlaneTolerance) {
     return "shelf-side";
   }
   return "ring-plane";
+}
+
+std::optional<std::size_t> ShelfWindowIndexForGoal(const std::array<double, 3>& tool) {
+  std::optional<std::size_t> best_index;
+  double best_distance = std::numeric_limits<double>::infinity();
+  for (std::size_t i = 0; i < kWindowSpecs.size(); ++i) {
+    if (std::abs(kWindowSpecs[i].plane_x - kShelfWindowPlaneX) > 1e-9) {
+      continue;
+    }
+    if (!ToolAlignedWithWindow(tool, kWindowSpecs[i], 1.15)) {
+      continue;
+    }
+    const double distance = std::abs(tool[1] - kWindowSpecs[i].center_y) +
+                            std::abs(tool[2] - kWindowSpecs[i].center_z);
+    if (distance < best_distance) {
+      best_distance = distance;
+      best_index = i;
+    }
+  }
+  return best_index;
 }
 
 void UpdatePlanningStatus(SharedPlanningStatus& status,
@@ -98,28 +119,29 @@ LoopPlanningResult PlanWithRetries(const std::filesystem::path& scene_path,
 
 std::vector<JointArray> BuildLoopGoals() {
   // Alternating Monte Carlo goals from `ur5_goal_monte_carlo`: approach-side
-  // states near the red-ring opening, then shelf-side states beyond the ring.
+  // states near the primary red-ring opening, then shelf-window states split
+  // between the low and high copied red-ring windows.
   return {
-      {-0.714914, -1.939293, 2.269405, -0.508076, 0.166652, -0.189688},
-      {-0.096216, -1.086041, 1.345283, -1.369316, -1.593129, -0.056186},
-      {-0.488742, -1.850435, 2.224668, -0.677578, 0.183500, 0.344208},
-      {-0.213614, -1.168882, 1.405913, -1.811450, -1.326496, 0.059855},
-      {-0.579322, -1.900877, 2.381239, -0.864813, 0.576803, -0.000548},
-      {-0.212407, -0.921127, 1.200219, -1.217947, -1.369968, 0.385050},
+      {-0.590469, -1.789239, 2.160045, -0.792644, 0.215248, -0.075016},
+      {-0.066236, -0.919917, 1.220043, -0.877790, -0.265118, 0.080547},
+      {-0.666903, -1.870113, 2.179305, -0.472320, 0.275371, 0.379068},
+      {-0.037932, -1.006641, 1.255414, -0.865408, 0.065840, 0.239123},
       {-0.525574, -1.736350, 2.037490, -0.546228, -0.395963, 0.083717},
-      {-0.136404, -0.941480, 0.967699, -0.939386, -1.808800, 0.047236},
-      {-0.226010, -1.767807, 2.188181, -0.837804, 0.089762, -0.196217},
-      {-0.164826, -1.259996, 1.572580, -1.862192, -1.829618, 0.224681},
-      {-0.156460, -1.832423, 2.193700, -0.559384, 0.554822, -0.169042},
-      {-0.203541, -0.951775, 0.972427, -0.957470, -1.275979, -0.097386},
-      {-0.071468, -2.141271, 2.357518, -0.722724, 0.216219, 0.152743},
-      {-0.126698, -1.120590, 1.403398, -1.422206, -2.124343, 0.130138},
-      {-0.401901, -1.666936, 2.104648, -0.287268, -0.044137, -0.311984},
-      {-0.288330, -1.078661, 1.220104, -1.394153, -0.917961, -0.020799},
-      {-0.427890, -2.052211, 2.320187, -1.226118, 0.217986, -0.019324},
-      {-0.126085, -0.838311, 1.190743, -1.201558, -1.653662, -0.543379},
-      {-0.552808, -1.723637, 2.222826, -0.145194, 0.608786, -0.027155},
-      {-0.168457, -1.256952, 1.584793, -2.052556, -1.807655, -0.353801},
+      {-0.101850, -0.976174, 1.282816, -0.992021, 0.000102, 0.577577},
+      {-0.478010, -1.950792, 2.415944, -1.129555, 0.534752, 0.087078},
+      {-0.069395, -1.014954, 1.279989, -0.681565, 0.162805, -0.334207},
+      {-0.209172, -1.821361, 2.195852, -0.716527, 0.619420, -0.058810},
+      {-0.025488, -0.992668, 1.380861, -0.933884, 0.277461, -0.228169},
+      {-0.761287, -1.959243, 2.244084, -1.080483, -0.040121, 0.341237},
+      {-0.059865, -1.039368, 1.346909, -0.913560, 0.556614, -0.000604},
+      {-0.168666, -1.749368, 2.065366, -0.485767, 0.074824, -0.141946},
+      {0.022854, -0.862817, 1.198943, -1.393905, 0.167542, 0.002161},
+      {-0.136299, -2.010973, 2.297995, -0.715362, 0.221923, 0.251150},
+      {0.057985, -0.753526, 1.018779, -1.381314, 0.348522, -0.108451},
+      {-0.250164, -1.893295, 2.204828, -0.970754, -0.210796, -0.039012},
+      {-0.085033, -0.992605, 1.380634, -0.662850, 0.538806, 0.195147},
+      {-0.446430, -1.642830, 2.137893, -0.228440, 0.527161, 0.051728},
+      {-0.257410, -1.055477, 1.323687, -0.579905, 0.519991, 0.497981},
   };
 }
 
@@ -322,6 +344,8 @@ int main(int argc, char** argv) {
     std::cout << "Loop goals: " << goals.size() << '\n';
     int needle_side_goals = 0;
     int shelf_side_goals = 0;
+    int shelf_low_goals = 0;
+    int shelf_high_goals = 0;
     bool all_goals_valid = true;
     bool alternating_sides = true;
     std::string previous_side;
@@ -332,6 +356,11 @@ int main(int argc, char** argv) {
       const bool valid = scene.IsStateValid(goals[i]);
       needle_side_goals += side == "needle-side" ? 1 : 0;
       shelf_side_goals += side == "shelf-side" ? 1 : 0;
+      if (side == "shelf-side") {
+        const std::optional<std::size_t> shelf_window = ShelfWindowIndexForGoal(tool);
+        shelf_low_goals += shelf_window.has_value() && *shelf_window == 1 ? 1 : 0;
+        shelf_high_goals += shelf_window.has_value() && *shelf_window == 2 ? 1 : 0;
+      }
       all_goals_valid = valid && all_goals_valid;
       alternating_sides = (previous_side.empty() || previous_side != side) && alternating_sides;
       previous_side = side;
@@ -341,15 +370,19 @@ int main(int argc, char** argv) {
     }
     std::cout << "Needle-side loop goals: " << needle_side_goals << '\n';
     std::cout << "Shelf-side loop goals: " << shelf_side_goals << '\n';
+    std::cout << "Shelf-low-window goals: " << shelf_low_goals << '\n';
+    std::cout << "Shelf-high-window goals: " << shelf_high_goals << '\n';
     std::cout << "Loop goals alternate sides: " << std::boolalpha << alternating_sides << '\n';
     std::cout << "Loop goals valid: " << std::boolalpha << all_goals_valid << '\n';
 
     if (check_goals) {
       if (goals.size() != 20 || needle_side_goals != 10 || shelf_side_goals != 10 ||
-          !alternating_sides || !all_goals_valid) {
+          shelf_low_goals != 5 || shelf_high_goals != 5 || !alternating_sides ||
+          !all_goals_valid) {
         return 1;
       }
       if (check_transitions) {
+        std::array<int, kWindowSpecs.size()> transition_window_hits{};
         for (std::size_t i = 0; i < goals.size(); ++i) {
           const std::size_t next = (i + 1) % goals.size();
           SharedPlanningStatus status;
@@ -359,10 +392,22 @@ int main(int argc, char** argv) {
                       << " failed: " << result.error << '\n';
             return 1;
           }
+          const std::array<int, kWindowSpecs.size()> window_hits =
+              WindowHitCounts(scene, result.plan.path);
+          for (std::size_t window = 0; window < kWindowSpecs.size(); ++window) {
+            transition_window_hits[window] += window_hits[window] > 0 ? 1 : 0;
+          }
           std::cout << "transition " << i + 1 << " -> " << next + 1
                     << " planned path=\"" << result.plan.path_kind
                     << "\" accepted_attempt=" << result.accepted_attempt
                     << " planning_wall_ms=" << result.plan.planning_wall_ms << '\n';
+        }
+        for (std::size_t window = 0; window < kWindowSpecs.size(); ++window) {
+          std::cout << "transition coverage " << kWindowSpecs[window].name << ": "
+                    << transition_window_hits[window] << '\n';
+          if (transition_window_hits[window] == 0) {
+            return 1;
+          }
         }
       }
       return 0;

@@ -382,6 +382,31 @@
   - `./build/ur5_path_diagnose build/scenes/ur5e_clutter.xml planned_path.csv 128`
     found 0 contacts, 0 negative robot-ring distances, and closest red-ring
     distance `0.025195 m`.
+- Tightened the red-ring scene and regenerated/validated the loop goals:
+  - reduced the primary ring opening to about half its previous width/height,
+  - added two copied red-ring shelf windows at the low/high shelf approach
+    locations,
+  - promoted the window geometry into shared `WindowSpec` data so planning
+    validation, loop checks, and Monte Carlo candidate scoring use the same
+    window definitions,
+  - replaced stale one-shot home/goal candidates with Monte Carlo window poses,
+  - the loop list remains 20 valid alternating goals: 10 primary-window
+    approach goals and 10 shelf-window goals split 5 low / 5 high,
+  - the deepest checked shelf-side loop goal reaches tool x about `-0.779 m`.
+- Verified after tightening the red-ring windows:
+  - `cmake --build build --target ur5_clutter_plan ur5_goal_loop_demo ur5_goal_monte_carlo ur5_path_diagnose`,
+  - `./build/ur5_goal_monte_carlo`,
+  - `./build/ur5_goal_loop_demo --check-goals`,
+  - `./build/ur5_goal_loop_demo --check-transitions`,
+  - transition coverage hit all three windows: primary, shelf-low, and
+    shelf-high,
+  - `./build/ur5_clutter_plan --no-live`,
+  - one-shot path hit the primary ring and both shelf windows with 0 planned
+    obstacle-contact states and 0 planned clearance-violation states,
+  - `./build/ur5_path_replay --check build/scenes/ur5e_clutter.xml executed_trace.csv`,
+  - `./build/ur5_path_diagnose build/scenes/ur5e_clutter.xml planned_path.csv 128`
+    found 0 contacts, 0 negative robot-ring distances, and closest red-ring
+    distance `0.015159 m`.
 
 ## Next
 
