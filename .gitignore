@@ -1,0 +1,5 @@
+build/
+cmake-build-*/
+.idea/
+planned_path.csv
+executed_trace.csv

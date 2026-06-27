@@ -1,0 +1,86 @@
+<mujoco model="ur5_clutter">
+  <compiler angle="radian" autolimits="true"/>
+  <option timestep="0.002" gravity="0 0 0" integrator="implicitfast"/>
+
+  <default>
+    <joint limited="true" damping="5" armature="0.03"/>
+    <geom friction="0.8 0.1 0.1"/>
+    <default class="robot">
+      <geom type="capsule" size="0.035" density="850" contype="1" conaffinity="2" rgba="0.10 0.35 0.85 1"/>
+    </default>
+    <default class="obstacle">
+      <geom type="box" contype="2" conaffinity="1" rgba="0.85 0.22 0.12 1"/>
+    </default>
+  </default>
+
+  <worldbody>
+    <geom name="floor" type="plane" size="1.5 1.5 0.02" contype="0" conaffinity="0" rgba="0.25 0.25 0.25 1"/>
+
+    <body name="shelf_back" pos="1.08 0 0.56">
+      <geom name="shelf_back_geom" class="obstacle" size="0.025 0.62 0.44"/>
+    </body>
+    <body name="shelf_left" pos="0.88 -0.62 0.56">
+      <geom name="shelf_left_geom" class="obstacle" size="0.23 0.025 0.44"/>
+    </body>
+    <body name="shelf_right" pos="0.88 0.62 0.56">
+      <geom name="shelf_right_geom" class="obstacle" size="0.23 0.025 0.44"/>
+    </body>
+    <body name="shelf_bottom" pos="0.88 0 0.14">
+      <geom name="shelf_bottom_geom" class="obstacle" size="0.23 0.62 0.025"/>
+    </body>
+    <body name="shelf_top" pos="0.88 0 0.98">
+      <geom name="shelf_top_geom" class="obstacle" size="0.23 0.62 0.025"/>
+    </body>
+
+    <body name="needle_ring" pos="0.62 0 0.58">
+      <geom name="ring_left_bar" class="obstacle" pos="0 -0.34 0" size="0.04 0.04 0.33"/>
+      <geom name="ring_right_bar" class="obstacle" pos="0 0.34 0" size="0.04 0.04 0.33"/>
+      <geom name="ring_top_bar" class="obstacle" pos="0 0 0.33" size="0.04 0.38 0.04"/>
+      <geom name="ring_bottom_bar" class="obstacle" pos="0 0 -0.33" size="0.04 0.38 0.04"/>
+    </body>
+
+    <body name="base" pos="0 0 0.04">
+      <geom name="base_geom" type="cylinder" size="0.12 0.04" contype="0" conaffinity="0" rgba="0.18 0.18 0.20 1"/>
+
+      <body name="shoulder_pan_link" pos="0 0 0.10">
+        <joint name="shoulder_pan" axis="0 0 1" range="-3.14159 3.14159"/>
+        <geom name="shoulder_pan_geom" class="robot" fromto="0 0 0 0 0 0.12" size="0.055"/>
+
+        <body name="shoulder_lift_link" pos="0 0 0.12">
+          <joint name="shoulder_lift" axis="0 1 0" range="-2.5 2.5"/>
+          <geom name="upper_arm_geom" class="robot" fromto="0 0 0 0.425 0 0" size="0.045"/>
+
+          <body name="elbow_link" pos="0.425 0 0">
+            <joint name="elbow" axis="0 1 0" range="-2.8 2.8"/>
+            <geom name="forearm_geom" class="robot" fromto="0 0 0 0.392 0 0" size="0.04"/>
+
+            <body name="wrist_1_link" pos="0.392 0 0">
+              <joint name="wrist_1" axis="0 1 0" range="-3.14159 3.14159"/>
+              <geom name="wrist_1_geom" class="robot" fromto="0 0 0 0.10 0 0" size="0.032"/>
+
+              <body name="wrist_2_link" pos="0.10 0 0">
+                <joint name="wrist_2" axis="0 0 1" range="-3.14159 3.14159"/>
+                <geom name="wrist_2_geom" class="robot" fromto="0 0 0 0.08 0 0" size="0.03"/>
+
+                <body name="wrist_3_link" pos="0.08 0 0">
+                  <joint name="wrist_3" axis="0 1 0" range="-3.14159 3.14159"/>
+                  <geom name="wrist_3_geom" class="robot" fromto="0 0 0 0.12 0 0" size="0.028"/>
+                  <site name="tool0" pos="0.14 0 0" size="0.025" rgba="0.1 1 0.1 1"/>
+                </body>
+              </body>
+            </body>
+          </body>
+        </body>
+      </body>
+    </body>
+  </worldbody>
+
+  <actuator>
+    <motor name="shoulder_pan_motor" joint="shoulder_pan" gear="1" ctrllimited="true" ctrlrange="-200 200"/>
+    <motor name="shoulder_lift_motor" joint="shoulder_lift" gear="1" ctrllimited="true" ctrlrange="-200 200"/>
+    <motor name="elbow_motor" joint="elbow" gear="1" ctrllimited="true" ctrlrange="-160 160"/>
+    <motor name="wrist_1_motor" joint="wrist_1" gear="1" ctrllimited="true" ctrlrange="-80 80"/>
+    <motor name="wrist_2_motor" joint="wrist_2" gear="1" ctrllimited="true" ctrlrange="-80 80"/>
+    <motor name="wrist_3_motor" joint="wrist_3" gear="1" ctrllimited="true" ctrlrange="-80 80"/>
+  </actuator>
+</mujoco>
