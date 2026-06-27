@@ -17,10 +17,10 @@ This project is intentionally separate from `projects/ros2-learning`.
   - loads an official Menagerie UR5e scene wrapped with local shelf/ring clutter,
   - checks home and goal validity,
   - plans a joint-space path with OMPL `RRTConnect`,
-  - simplifies/shortcuts the geometric path,
-  - tries OMPL B-spline smoothing and keeps it only if the 2.5 cm planning
-    clearance cushion is preserved,
-  - executes the interpolated path with Menagerie position actuators,
+  - shortcut-simplifies the geometric path into hard knots,
+  - fits a natural cubic joint-space spline through those knots, giving C2
+    continuity at internal knots,
+  - executes the sampled C2 path with Menagerie position actuators,
   - writes `planned_path.csv` and `executed_trace.csv`.
 - A C++23 executable, `ur5_path_replay`, that:
   - loads the same MuJoCo scene,
@@ -104,7 +104,9 @@ Successful validation includes:
 Robot model: MuJoCo Menagerie UR5e
 Control mode: position servo
 Selected goal tool position: [-0.704, -0.232, 0.153]
-OMPL using B-spline-smoothed path: true
+C2 spline max knot position error: <near zero>
+C2 spline max C1 discontinuity: <near zero>
+C2 spline max C2 discontinuity: <near zero>
 Planned path obstacle-contact states: 0
 Planning obstacle clearance: 0.025 m
 Planned path clearance-violation states: 0

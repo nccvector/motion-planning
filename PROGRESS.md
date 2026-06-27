@@ -145,6 +145,39 @@
     `0.024841 m`,
   - executed trace: 0 contacts, 0 negative distances, closest red-ring distance
     `0.020901 m`.
+- Replaced final B-spline smoothing with an interpolating natural cubic
+  joint-space spline:
+  - RRTConnect still finds the geometric path,
+  - OMPL shortcut simplification produces hard knots,
+  - the natural cubic spline passes through those knots exactly,
+  - the spline is C2 continuous at internal knots by construction,
+  - the sampled spline must preserve the 2.5 cm planning clearance or the
+    planner rejects it and replans.
+- Added C2 verification output:
+  - max knot position error,
+  - max C1 discontinuity,
+  - max C2 discontinuity.
+- Verified 5 end-to-end `./build/ur5_clutter_plan` runs with C2 spline output:
+  - all accepted final paths were sampled C2 natural cubic splines,
+  - rejected candidate splines were replanned when they lost planning clearance,
+  - accepted C2 residuals were around machine precision (`~1e-15`),
+  - all accepted runs had 0 planned clearance violations and 0 PID
+    clearance-violation steps.
+- Latest accepted C2 run:
+  - hard knots: 12,
+  - samples: 240,
+  - max knot position error: `1.110e-16 rad`,
+  - max C1 discontinuity: `7.216e-16 rad/path-unit`,
+  - max C2 discontinuity: `5.329e-15 rad/path-unit^2`,
+  - PID obstacle-contact steps: 0,
+  - PID clearance-violation steps: 0.
+- Latest C2 dense diagnostics:
+  - planned path: 0 contacts, 0 negative red-ring distances, closest red-ring
+    distance `0.057827 m`,
+  - executed trace: 0 contacts, 0 negative red-ring distances, closest red-ring
+    distance `0.063210 m`,
+  - CSV summaries showed 0 contact rows and 0 clearance-violation rows for both
+    planned and executed traces.
 
 ## Next
 

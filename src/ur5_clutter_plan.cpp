@@ -3,7 +3,6 @@
 #include <ompl/base/spaces/RealVectorBounds.h>
 #include <ompl/base/spaces/RealVectorStateSpace.h>
 #include <ompl/geometric/PathGeometric.h>
-#include <ompl/geometric/PathSimplifier.h>
 #include <ompl/geometric/SimpleSetup.h>
 #include <ompl/geometric/planners/rrt/RRTConnect.h>
 
@@ -35,8 +34,16 @@ constexpr double kRingHalfOpeningZ = 0.400;
 // Plan with cushion; validate with the hard floor we actually require.
 constexpr double kRequiredObstacleClearance = 0.010;
 constexpr double kPlanningObstacleClearance = 0.025;
+constexpr std::size_t kInterpolatedPathStates = 240;
 
 using JointArray = std::array<double, kDof>;
+
+struct C2SplineResult {
+  std::vector<JointArray> path;
+  double max_knot_position_error = 0.0;
+  double max_c1_discontinuity = 0.0;
+  double max_c2_discontinuity = 0.0;
+};
 
 struct RobotNames {
   const char* label;
@@ -420,12 +427,204 @@ double MaxAbs(const JointArray& values) {
   return result;
 }
 
-int PathClearanceViolationCount(Ur5Scene& scene,
-                                const og::PathGeometric& path,
-                                double required_clearance) {
-  int violations = 0;
+double JointDistance(const JointArray& a, const JointArray& b) {
+  double sum = 0.0;
+  for (int i = 0; i < kDof; ++i) {
+    const double delta = b[i] - a[i];
+    sum += delta * delta;
+  }
+  return std::sqrt(sum);
+}
+
+std::vector<JointArray> PathStatesToJoints(const og::PathGeometric& path) {
+  std::vector<JointArray> result;
+  result.reserve(path.getStateCount());
   for (std::size_t i = 0; i < path.getStateCount(); ++i) {
-    scene.SetConfiguration(StateToJoints(path.getState(i)));
+    result.push_back(StateToJoints(path.getState(i)));
+  }
+  return result;
+}
+
+std::vector<double> ChordLengthParameters(const std::vector<JointArray>& knots) {
+  std::vector<double> parameters(knots.size(), 0.0);
+  for (std::size_t i = 1; i < knots.size(); ++i) {
+    parameters[i] = parameters[i - 1] + JointDistance(knots[i - 1], knots[i]);
+  }
+  if (parameters.back() <= 1.0e-12) {
+    throw std::runtime_error("Cannot build a C2 spline through a zero-length path");
+  }
+  return parameters;
+}
+
+std::vector<JointArray> NaturalSplineSecondDerivatives(const std::vector<JointArray>& knots,
+                                                       const std::vector<double>& parameters) {
+  const std::size_t n = knots.size();
+  std::vector<JointArray> second_derivatives(n, JointArray{});
+  if (n <= 2) {
+    return second_derivatives;
+  }
+
+  const std::size_t interior_count = n - 2;
+  for (int joint = 0; joint < kDof; ++joint) {
+    std::vector<double> lower(interior_count, 0.0);
+    std::vector<double> diagonal(interior_count, 0.0);
+    std::vector<double> upper(interior_count, 0.0);
+    std::vector<double> rhs(interior_count, 0.0);
+
+    for (std::size_t row = 0; row < interior_count; ++row) {
+      const std::size_t i = row + 1;
+      const double h_prev = parameters[i] - parameters[i - 1];
+      const double h_next = parameters[i + 1] - parameters[i];
+      lower[row] = row == 0 ? 0.0 : h_prev;
+      diagonal[row] = 2.0 * (h_prev + h_next);
+      upper[row] = row + 1 == interior_count ? 0.0 : h_next;
+      rhs[row] = 6.0 * ((knots[i + 1][joint] - knots[i][joint]) / h_next -
+                        (knots[i][joint] - knots[i - 1][joint]) / h_prev);
+    }
+
+    for (std::size_t row = 1; row < interior_count; ++row) {
+      const double factor = lower[row] / diagonal[row - 1];
+      diagonal[row] -= factor * upper[row - 1];
+      rhs[row] -= factor * rhs[row - 1];
+    }
+
+    std::vector<double> solution(interior_count, 0.0);
+    solution.back() = rhs.back() / diagonal.back();
+    for (std::size_t reverse_row = interior_count - 1; reverse_row > 0; --reverse_row) {
+      const std::size_t row = reverse_row - 1;
+      solution[row] = (rhs[row] - upper[row] * solution[row + 1]) / diagonal[row];
+    }
+
+    for (std::size_t row = 0; row < interior_count; ++row) {
+      second_derivatives[row + 1][joint] = solution[row];
+    }
+  }
+
+  return second_derivatives;
+}
+
+std::size_t SplineSegmentFor(const std::vector<double>& parameters, double s) {
+  if (s <= parameters.front()) {
+    return 0;
+  }
+  if (s >= parameters.back()) {
+    return parameters.size() - 2;
+  }
+  const auto upper = std::upper_bound(parameters.begin(), parameters.end(), s);
+  return static_cast<std::size_t>(std::distance(parameters.begin(), upper) - 1);
+}
+
+JointArray EvaluateNaturalSpline(const std::vector<JointArray>& knots,
+                                 const std::vector<double>& parameters,
+                                 const std::vector<JointArray>& second_derivatives,
+                                 double s) {
+  const std::size_t segment = SplineSegmentFor(parameters, s);
+  const double h = parameters[segment + 1] - parameters[segment];
+  const double u = s - parameters[segment];
+  JointArray q{};
+  for (int joint = 0; joint < kDof; ++joint) {
+    const double y0 = knots[segment][joint];
+    const double y1 = knots[segment + 1][joint];
+    const double m0 = second_derivatives[segment][joint];
+    const double m1 = second_derivatives[segment + 1][joint];
+    const double a = y0;
+    const double b = (y1 - y0) / h - h * (2.0 * m0 + m1) / 6.0;
+    const double c = m0 / 2.0;
+    const double d = (m1 - m0) / (6.0 * h);
+    q[joint] = a + b * u + c * u * u + d * u * u * u;
+  }
+  return q;
+}
+
+JointArray EvaluateNaturalSplineDerivative(const std::vector<JointArray>& knots,
+                                           const std::vector<double>& parameters,
+                                           const std::vector<JointArray>& second_derivatives,
+                                           std::size_t segment,
+                                           double u) {
+  const double h = parameters[segment + 1] - parameters[segment];
+  JointArray qd{};
+  for (int joint = 0; joint < kDof; ++joint) {
+    const double y0 = knots[segment][joint];
+    const double y1 = knots[segment + 1][joint];
+    const double m0 = second_derivatives[segment][joint];
+    const double m1 = second_derivatives[segment + 1][joint];
+    const double b = (y1 - y0) / h - h * (2.0 * m0 + m1) / 6.0;
+    const double c = m0 / 2.0;
+    const double d = (m1 - m0) / (6.0 * h);
+    qd[joint] = b + 2.0 * c * u + 3.0 * d * u * u;
+  }
+  return qd;
+}
+
+JointArray EvaluateNaturalSplineSecondDerivative(const std::vector<double>& parameters,
+                                                 const std::vector<JointArray>& second_derivatives,
+                                                 std::size_t segment,
+                                                 double u) {
+  const double h = parameters[segment + 1] - parameters[segment];
+  JointArray qdd{};
+  for (int joint = 0; joint < kDof; ++joint) {
+    const double m0 = second_derivatives[segment][joint];
+    const double m1 = second_derivatives[segment + 1][joint];
+    const double c = m0 / 2.0;
+    const double d = (m1 - m0) / (6.0 * h);
+    qdd[joint] = 2.0 * c + 6.0 * d * u;
+  }
+  return qdd;
+}
+
+C2SplineResult SampleNaturalCubicSpline(const std::vector<JointArray>& knots,
+                                        std::size_t sample_count) {
+  if (knots.size() < 2) {
+    throw std::runtime_error("Need at least two knots for C2 spline sampling");
+  }
+  if (sample_count < 2) {
+    throw std::runtime_error("Need at least two samples for C2 spline sampling");
+  }
+
+  const std::vector<double> parameters = ChordLengthParameters(knots);
+  const std::vector<JointArray> second_derivatives =
+      NaturalSplineSecondDerivatives(knots, parameters);
+
+  C2SplineResult result;
+  result.path.reserve(sample_count);
+  for (std::size_t sample = 0; sample < sample_count; ++sample) {
+    const double alpha = static_cast<double>(sample) / static_cast<double>(sample_count - 1);
+    const double s = parameters.back() * alpha;
+    result.path.push_back(EvaluateNaturalSpline(knots, parameters, second_derivatives, s));
+  }
+
+  for (std::size_t i = 0; i < knots.size(); ++i) {
+    const JointArray q = EvaluateNaturalSpline(knots, parameters, second_derivatives, parameters[i]);
+    result.max_knot_position_error =
+        std::max(result.max_knot_position_error, MaxAbsJointError(q, knots[i]));
+  }
+
+  for (std::size_t knot = 1; knot + 1 < knots.size(); ++knot) {
+    const double h_left = parameters[knot] - parameters[knot - 1];
+    const JointArray left_velocity =
+        EvaluateNaturalSplineDerivative(knots, parameters, second_derivatives, knot - 1, h_left);
+    const JointArray right_velocity =
+        EvaluateNaturalSplineDerivative(knots, parameters, second_derivatives, knot, 0.0);
+    const JointArray left_acceleration =
+        EvaluateNaturalSplineSecondDerivative(parameters, second_derivatives, knot - 1, h_left);
+    const JointArray right_acceleration =
+        EvaluateNaturalSplineSecondDerivative(parameters, second_derivatives, knot, 0.0);
+    result.max_c1_discontinuity =
+        std::max(result.max_c1_discontinuity, MaxAbsJointError(left_velocity, right_velocity));
+    result.max_c2_discontinuity =
+        std::max(result.max_c2_discontinuity,
+                 MaxAbsJointError(left_acceleration, right_acceleration));
+  }
+
+  return result;
+}
+
+int JointPathClearanceViolationCount(Ur5Scene& scene,
+                                     const std::vector<JointArray>& path,
+                                     double required_clearance) {
+  int violations = 0;
+  for (const JointArray& q : path) {
+    scene.SetConfiguration(q);
     if (scene.ObstacleClearanceViolationCount(required_clearance) > 0) {
       ++violations;
     }
@@ -510,9 +709,9 @@ JointArray SelectGoal(Ur5Scene& scene) {
   throw std::runtime_error("No collision-free shelf-side goal candidate found");
 }
 
-std::vector<JointArray> PlanPath(Ur5Scene& scene,
-                                 const JointArray& home_q,
-                                 const JointArray& goal_q) {
+std::vector<JointArray> PlanPathOnce(Ur5Scene& scene,
+                                     const JointArray& home_q,
+                                     const JointArray& goal_q) {
   auto space = std::make_shared<ob::RealVectorStateSpace>(kDof);
   ob::RealVectorBounds bounds(kDof);
   for (int i = 0; i < kDof; ++i) {
@@ -545,33 +744,58 @@ std::vector<JointArray> PlanPath(Ur5Scene& scene,
   }
 
   const std::size_t raw_state_count = setup.getSolutionPath().getStateCount();
-  setup.simplifySolution(1.0);
-
   og::PathGeometric path = setup.getSolutionPath();
-  const std::size_t simplified_state_count = path.getStateCount();
-  og::PathGeometric bspline_path(path);
-  setup.getPathSimplifier()->smoothBSpline(bspline_path, 5, bspline_path.length() / 100.0);
-  const std::size_t bspline_state_count = bspline_path.getStateCount();
-  const int bspline_planning_clearance_violations =
-      PathClearanceViolationCount(scene, bspline_path, kPlanningObstacleClearance);
-  const bool using_bspline = bspline_planning_clearance_violations == 0;
-  if (using_bspline) {
-    path = bspline_path;
-  }
-  path.interpolate(240);
-  std::cout << "OMPL raw path states: " << raw_state_count << '\n';
-  std::cout << "OMPL simplified path states: " << simplified_state_count << '\n';
-  std::cout << "OMPL B-spline-smoothed path states: " << bspline_state_count << '\n';
-  std::cout << "OMPL B-spline planning-clearance violation states: "
-            << bspline_planning_clearance_violations << '\n';
-  std::cout << "OMPL using B-spline-smoothed path: " << std::boolalpha << using_bspline << '\n';
 
-  std::vector<JointArray> result;
-  result.reserve(path.getStateCount());
-  for (std::size_t i = 0; i < path.getStateCount(); ++i) {
-    result.push_back(StateToJoints(path.getState(i)));
+  setup.getPathSimplifier()->reduceVertices(path);
+  setup.getPathSimplifier()->partialShortcutPath(path, 240, 80, 1.0);
+  const auto [still_valid, repaired] = path.checkAndRepair(64);
+  if (!still_valid && !repaired) {
+    throw std::runtime_error("OMPL shortcut path could not be repaired after simplification");
   }
-  return result;
+
+  const std::size_t simplified_state_count = path.getStateCount();
+  const std::vector<JointArray> spline_knots = PathStatesToJoints(path);
+  const C2SplineResult c2_path = SampleNaturalCubicSpline(spline_knots, kInterpolatedPathStates);
+  const int c2_planning_clearance_violations =
+      JointPathClearanceViolationCount(scene, c2_path.path, kPlanningObstacleClearance);
+
+  std::cout << "OMPL raw path states: " << raw_state_count << '\n';
+  std::cout << "OMPL shortcut-simplified hard knots: " << simplified_state_count << '\n';
+  std::cout << "C2 natural cubic spline samples: " << c2_path.path.size() << '\n';
+  std::cout << "C2 spline planning-clearance violation states: "
+            << c2_planning_clearance_violations << '\n';
+  std::cout << std::scientific << std::setprecision(3)
+            << "C2 spline max knot position error: " << c2_path.max_knot_position_error
+            << " rad\n"
+            << "C2 spline max C1 discontinuity: " << c2_path.max_c1_discontinuity
+            << " rad/path-unit\n"
+            << "C2 spline max C2 discontinuity: " << c2_path.max_c2_discontinuity
+            << " rad/path-unit^2\n"
+            << std::defaultfloat << std::setprecision(6);
+
+  if (c2_planning_clearance_violations > 0) {
+    throw std::runtime_error("C2 spline violates planning clearance; need more clearance or knots");
+  }
+
+  return c2_path.path;
+}
+
+std::vector<JointArray> PlanPath(Ur5Scene& scene,
+                                 const JointArray& home_q,
+                                 const JointArray& goal_q) {
+  std::string last_error;
+  constexpr int kMaxPlanningAttempts = 10;
+  for (int attempt = 1; attempt <= kMaxPlanningAttempts; ++attempt) {
+    try {
+      std::cout << "Planning attempt: " << attempt << '\n';
+      return PlanPathOnce(scene, home_q, goal_q);
+    } catch (const std::exception& e) {
+      last_error = e.what();
+      std::cout << "Planning attempt " << attempt << " rejected: " << last_error << '\n';
+    }
+  }
+  throw std::runtime_error("Failed to find a clearance-valid C2 spline after " +
+                           std::to_string(kMaxPlanningAttempts) + " attempts: " + last_error);
 }
 
 void ValidatePlannedPath(Ur5Scene& scene, const std::vector<JointArray>& path) {
@@ -725,7 +949,7 @@ int main(int argc, char** argv) {
     PrintPose("Selected goal", scene, goal);
 
     const auto path = PlanPath(scene, home, goal);
-    std::cout << "OMPL path states after interpolation: " << path.size() << '\n';
+    std::cout << "Planned C2 path states: " << path.size() << '\n';
     ValidatePlannedPath(scene, path);
     ReportRingPassage(scene, path);
 
