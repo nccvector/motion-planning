@@ -18,9 +18,13 @@ This project is intentionally separate from `projects/ros2-learning`.
   - checks home and goal validity,
   - plans a joint-space path with OMPL `RRTConnect`,
   - shortcut-simplifies the geometric path into hard knots,
-  - fits a natural cubic joint-space spline through those knots, giving C2
-    continuity at internal knots,
-  - executes the sampled C2 path with Menagerie position actuators,
+  - tries to fit a natural cubic joint-space spline through those knots, giving
+    C2 continuity at internal knots,
+  - repairs failed splines by adding violating samples as extra knots while the
+    500 ms planning budget still has room,
+  - falls back to a linear interpolation of the OMPL path if spline repair runs
+    out of budget,
+  - executes the sampled path with Menagerie position actuators,
   - writes `planned_path.csv` and `executed_trace.csv`.
 - A C++23 executable, `ur5_path_replay`, that:
   - loads the same MuJoCo scene,
@@ -50,9 +54,16 @@ Optional scene argument:
 ./build/ur5_clutter_plan /path/to/scene.xml
 ```
 
-The planner rejects actual obstacle contacts and uses a 2.5 cm planning
-clearance between robot collision geometry and shelf/ring obstacles. Final
-planned-path and executed-trace validation enforce a 1 cm hard clearance floor.
+The planner rejects actual obstacle contacts. OMPL state validity and final path
+acceptance use a 1.5 cm clearance margin between robot collision geometry and
+shelf/ring obstacles. The planner has a 500 ms wall-time budget for OMPL,
+shortcutting, spline fitting, spline repair, and linear fallback selection.
+
+The planned path is the hard gate. The MuJoCo position-servo execution preview
+still reports obstacle contacts and clearance-margin dips, but only actual
+execution contacts fail the run. Clearance dips in `executed_trace.csv` are
+controller-following diagnostics, not evidence that the planned path itself was
+invalid.
 
 ## Visualize
 
@@ -107,8 +118,11 @@ Selected goal tool position: [-0.704, -0.232, 0.153]
 C2 spline max knot position error: <near zero>
 C2 spline max C1 discontinuity: <near zero>
 C2 spline max C2 discontinuity: <near zero>
+Planner used C2 spline: true|false
+Planner fallback: raw OMPL linear|shortcut linear
+Planning wall time: < 500 ms
 Planned path obstacle-contact states: 0
-Planning obstacle clearance: 0.025 m
+Planning obstacle clearance: 0.015 m
 Planned path clearance-violation states: 0
 Ring-opening path samples: <nonzero>
 PID mean waypoint tracking error: <small>

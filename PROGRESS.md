@@ -178,6 +178,49 @@
     distance `0.063210 m`,
   - CSV summaries showed 0 contact rows and 0 clearance-violation rows for both
     planned and executed traces.
+- Reworked the planner into a single 500 ms budgeted pipeline instead of
+  replanning when smoothing fails:
+  - OMPL `RRTConnect` gets most of the budget and may return exact or approximate
+    solutions,
+  - shortcut simplification is treated as optional; failed shortcut repair falls
+    back to the raw OMPL path,
+  - natural cubic C2 fitting is attempted on the simplified knots,
+  - failed spline samples are added back as extra hard knots while enough time
+    and knot budget remain,
+  - if spline fitting cannot satisfy clearance inside the budget, the planner
+    falls back to a linear interpolation of the OMPL path, preferring the raw
+    OMPL path over shortcut-linear fallback.
+- Current timing and margin choices:
+  - planning budget: `0.500 s`,
+  - OMPL obstacle clearance: `0.015 m`,
+  - final planned-path clearance: `0.015 m`,
+  - hard clearance floor: `0.010 m`,
+  - sampled output path states: `480`.
+- Added execution command substeps so the MuJoCo position-servo preview receives
+  smaller setpoint jumps.
+- Changed execution clearance-margin dips from a hard failure into diagnostics:
+  - actual execution obstacle contacts still fail,
+  - planned-path contact/clearance validation remains the hard gate,
+  - PID clearance-violation steps now indicate controller-following risk rather
+    than invalidating the geometric plan.
+- Latest accepted run after the 500 ms pipeline:
+  - OMPL exact solution: `true`,
+  - planner used C2 spline: `true`,
+  - spline repair iterations: `0`,
+  - planning wall time: `341.691 ms`,
+  - planned path states: `480`,
+  - final planned path planning-clearance violation states: `0`,
+  - final planned path hard-clearance violation states: `0`,
+  - PID obstacle-contact steps: `0`,
+  - PID clearance-violation steps: `0`.
+- Latest dense diagnostics after the 500 ms pipeline:
+  - `./build/ur5_path_diagnose build/scenes/ur5e_clutter.xml planned_path.csv 128`
+    found 0 contacts, 0 negative robot-ring distances, closest red-ring distance
+    `0.015504 m`,
+  - `./build/ur5_path_replay --check build/scenes/ur5e_clutter.xml planned_path.csv`
+    loaded 480 frames successfully,
+  - `./build/ur5_path_replay --check build/scenes/ur5e_clutter.xml executed_trace.csv`
+    loaded the generated 459657-frame execution trace successfully.
 
 ## Next
 
