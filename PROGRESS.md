@@ -108,6 +108,25 @@
   - `./build/ur5_path_diagnose build/scenes/ur5e_clutter.xml executed_trace.csv 4`
     found 0 contacts, 0 negative distances, closest red-ring distance `0.021725 m`.
   - CSV summaries showed 0 clearance-violation rows for both planned and executed traces.
+- Added OMPL path simplification before interpolation:
+  - `setup.simplifySolution(1.0)` runs after RRTConnect solves,
+  - the planner reports raw, simplified, and interpolated path state counts,
+  - validation still runs after simplification/interpolation.
+- Added PID waypoint-tracking diagnostics:
+  - final max joint error,
+  - mean waypoint tracking error,
+  - max waypoint tracking error.
+- Fixed `ur5_path_diagnose` closest-distance reporting for cases where MuJoCo
+  returned `0` while witness points were nonzero-distance apart.
+- Verified 3 consecutive `./build/ur5_clutter_plan` runs after simplification:
+  - simplified paths had 6-7 waypoints before interpolation,
+  - all had 0 planned clearance violations and 0 PID clearance-violation steps,
+  - observed max waypoint tracking error range was `0.020-0.047 rad`.
+- Latest dense red-ring diagnostics after simplification:
+  - planned path: 0 contacts, 0 negative distances, closest red-ring distance
+    `0.026301 m`,
+  - executed trace: 0 contacts, 0 negative distances, closest red-ring distance
+    `0.028734 m`.
 
 ## Next
 

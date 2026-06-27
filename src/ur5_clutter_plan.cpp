@@ -530,8 +530,14 @@ std::vector<JointArray> PlanPath(Ur5Scene& scene,
     throw std::runtime_error("OMPL did not find a collision-free path");
   }
 
+  const std::size_t raw_state_count = setup.getSolutionPath().getStateCount();
+  setup.simplifySolution(1.0);
+
   og::PathGeometric path = setup.getSolutionPath();
+  const std::size_t simplified_state_count = path.getStateCount();
   path.interpolate(240);
+  std::cout << "OMPL raw path states: " << raw_state_count << '\n';
+  std::cout << "OMPL simplified path states: " << simplified_state_count << '\n';
 
   std::vector<JointArray> result;
   result.reserve(path.getStateCount());
@@ -596,16 +602,21 @@ void ExecutePath(const std::filesystem::path& trace_file,
   int step = 0;
   int contact_steps = 0;
   int clearance_violation_steps = 0;
+  double max_tracking_error = 0.0;
+  double sum_tracking_error = 0.0;
   for (std::size_t target_index = 0; target_index < path.size(); ++target_index) {
     const JointArray& target = path[target_index];
     for (int local_step = 0; local_step < 240; ++local_step) {
       scene.ApplyPidStep(target, integral);
+      const auto q = scene.CurrentConfiguration();
+      const double tracking_error = MaxAbsJointError(q, target);
+      max_tracking_error = std::max(max_tracking_error, tracking_error);
+      sum_tracking_error += tracking_error;
       const int obstacle_contacts = scene.ObstacleContactCount();
       const int clearance_violations = scene.ObstacleClearanceViolationCount();
       const double min_obstacle_clearance = scene.MinimumObstacleClearance();
       contact_steps += obstacle_contacts > 0 ? 1 : 0;
       clearance_violation_steps += clearance_violations > 0 ? 1 : 0;
-      const auto q = scene.CurrentConfiguration();
       const auto tool = scene.ToolPosition();
       out << step << ',' << target_index;
       for (const double value : q) {
@@ -621,8 +632,11 @@ void ExecutePath(const std::filesystem::path& trace_file,
   }
 
   const double final_error = MaxAbsJointError(scene.CurrentConfiguration(), path.back());
+  const double mean_tracking_error = step > 0 ? sum_tracking_error / step : 0.0;
   std::cout << "PID execution steps: " << step << '\n';
   std::cout << "PID final max joint error: " << final_error << " rad\n";
+  std::cout << "PID mean waypoint tracking error: " << mean_tracking_error << " rad\n";
+  std::cout << "PID max waypoint tracking error: " << max_tracking_error << " rad\n";
   std::cout << "PID obstacle-contact steps: " << contact_steps << '\n';
   std::cout << "PID clearance-violation steps: " << clearance_violation_steps << '\n';
 

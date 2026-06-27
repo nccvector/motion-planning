@@ -17,6 +17,7 @@ This project is intentionally separate from `projects/ros2-learning`.
   - loads an official Menagerie UR5e scene wrapped with local shelf/ring clutter,
   - checks home and goal validity,
   - plans a joint-space path with OMPL `RRTConnect`,
+  - simplifies/shortcuts the geometric path before interpolation,
   - executes the interpolated path with Menagerie position actuators,
   - writes `planned_path.csv` and `executed_trace.csv`.
 - A C++23 executable, `ur5_path_replay`, that:
@@ -105,6 +106,8 @@ Planned path obstacle-contact states: 0
 Planning obstacle clearance: 0.025 m
 Planned path clearance-violation states: 0
 Ring-opening path samples: <nonzero>
+PID mean waypoint tracking error: <small>
+PID max waypoint tracking error: <small>
 PID obstacle-contact steps: 0
 PID clearance-violation steps: 0
 ```

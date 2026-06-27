@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <array>
+#include <cmath>
 #include <cstdlib>
 #include <filesystem>
 #include <fstream>
@@ -18,7 +19,7 @@
 namespace {
 
 constexpr int kDof = 6;
-constexpr mjtNum kDistanceCutoff = 0.30;
+constexpr mjtNum kDistanceCutoff = 10.0;
 
 using JointArray = std::array<double, kDof>;
 
@@ -209,6 +210,13 @@ std::string FormatLocation(const SampleLocation& location) {
   return out.str();
 }
 
+double WitnessDistance(const mjtNum* fromto) {
+  const double dx = static_cast<double>(fromto[0] - fromto[3]);
+  const double dy = static_cast<double>(fromto[1] - fromto[4]);
+  const double dz = static_cast<double>(fromto[2] - fromto[5]);
+  return std::sqrt(dx * dx + dy * dy + dz * dz);
+}
+
 void AnalyzeSample(mjModel* model,
                    mjData* data,
                    const JointBinding& binding,
@@ -246,8 +254,13 @@ void AnalyzeSample(mjModel* model,
       if (distance < 0.0) {
         negative_distance = true;
       }
-      if (distance < closest.distance) {
-        closest.distance = distance;
+      double effective_distance = static_cast<double>(distance);
+      const double witness_distance = WitnessDistance(fromto);
+      if (distance == 0.0 && witness_distance > 1.0e-9) {
+        effective_distance = witness_distance;
+      }
+      if (effective_distance < closest.distance) {
+        closest.distance = effective_distance;
         closest.location = location;
         closest.robot_geom = robot_geom;
         closest.ring_geom = ring_geom;
