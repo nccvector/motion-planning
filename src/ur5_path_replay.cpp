@@ -51,7 +51,7 @@ struct ReplayState {
   std::size_t frame = 0;
   bool playing = true;
   bool show_collision_model = true;
-  double speed = 0.45;
+  double speed = 1.0;
 };
 
 mjModel* g_model = nullptr;

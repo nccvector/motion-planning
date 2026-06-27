@@ -221,6 +221,7 @@
     loaded 480 frames successfully,
   - `./build/ur5_path_replay --check build/scenes/ur5e_clutter.xml executed_trace.csv`
     loaded the generated 459657-frame execution trace successfully.
+- Changed the interactive replay default speed from `0.45x` to realtime `1.0x`.
 
 ## Next
 
