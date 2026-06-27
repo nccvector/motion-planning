@@ -49,7 +49,10 @@ cmake --build build -j
 ```
 
 This plans the path, opens a live MuJoCo window for the PID execution preview,
-and still writes `planned_path.csv` and `executed_trace.csv`.
+and still writes `planned_path.csv` and `executed_trace.csv`. The PID controller
+runs as a fixed-rate realtime control loop: each MuJoCo timestep computes the
+desired point along the time-parametrized path, applies one control update, and
+advances the simulation once.
 
 Optional scene argument:
 
@@ -61,6 +64,13 @@ Non-interactive run without the live PID window:
 
 ```bash
 ./build/ur5_clutter_plan --no-live
+```
+
+The default live viewer is paced to MuJoCo simulation time. For a fast preview
+that does not sleep to realtime:
+
+```bash
+./build/ur5_clutter_plan --live-fast
 ```
 
 The planner rejects actual obstacle contacts. OMPL state validity and final path
@@ -77,7 +87,8 @@ The planned path is the hard gate. The MuJoCo position-servo execution preview
 still reports obstacle contacts and clearance-margin dips, but only actual
 execution contacts fail the run. Clearance dips in `executed_trace.csv` are
 controller-following diagnostics, not evidence that the planned path itself was
-invalid.
+invalid. Execution trace clearance diagnostics are sampled rather than computed
+at every internal physics step to keep the realtime control loop lightweight.
 
 ## Visualize
 
@@ -150,7 +161,11 @@ Ring-opening path samples: <nonzero>
 PID mean waypoint tracking error: <small>
 PID max waypoint tracking error: <small>
 PID obstacle-contact steps: 0
-PID clearance-violation steps: 0
+PID timing clearance/diagnostics: <diagnostic cost>
+PID trajectory duration: <scheduled motion duration>
+PID final hold duration: <final target hold>
+PID simulated time: <execution duration in MuJoCo seconds>
+PID clearance-violation trace rows: <sampled diagnostic count>
 ```
 
 ## Scope

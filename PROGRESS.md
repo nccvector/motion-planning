@@ -267,11 +267,47 @@
     `0.019222 m`,
   - `./build/ur5_path_replay --check build/scenes/ur5e_clutter.xml planned_path.csv`
     loaded 480 frames successfully.
+- Investigated the long delay after the live PID window launches:
+  - a headless timing run showed the post-plan PID preview took `15456.3 ms`,
+  - it simulated `919.792 s` of MuJoCo time at a `0.002 s` timestep,
+  - it executed `459896` internal PID physics steps and hit the per-setpoint
+    settle cap `1916` times,
+  - the largest CPU cost was per-step clearance diagnostics:
+    `12754.9 ms` of the `15456.3 ms` total,
+  - live realtime pacing would intentionally stretch that same simulation to
+    roughly 15 minutes, which explains the apparent hang after the GUI appears.
+- Updated live PID execution behavior:
+  - root correction: the PID controller should run as a fixed-rate realtime
+    loop, but the old executor was a settle-per-waypoint loop,
+  - replaced the nested "hold each micro-target until settled" executor with a
+    time-parametrized trajectory follower,
+  - every MuJoCo timestep now computes the desired path state for that time,
+    applies one PID/position-servo update, and advances simulation once,
+  - default live viewing is paced to MuJoCo simulation time again because the
+    simulated trajectory is now seconds long, not hundreds of seconds,
+  - `--live-fast` opts into unpaced fast preview,
+  - `executed_trace.csv` samples execution diagnostics every 16 internal steps,
+    while obstacle contacts are still checked every internal step.
+- Verified the post-plan timing after realtime controller correction:
+  - `./build/ur5_clutter_plan --no-live` exited successfully,
+  - planning wall time: `258.053 ms`,
+  - PID trajectory duration: `5.455 s`,
+  - final hold duration: `1.000 s`,
+  - simulated time: `6.458 s`,
+  - PID execution steps: `3229`,
+  - PID timing total was `23.479 ms` headless,
+  - `executed_trace.csv` contained `203` replayable frames,
+  - `./build/ur5_path_replay --check build/scenes/ur5e_clutter.xml executed_trace.csv`
+    loaded the generated trace successfully,
+  - dense planned-path diagnostic found 0 contacts, 0 negative robot-ring
+    distances, and closest red-ring distance `0.019226 m`.
 
 ## Next
 
 - Run `./build/ur5_clutter_plan` normally to see live PID execution immediately
   after planning.
 - Use `./build/ur5_clutter_plan --no-live` for repeated planner/debug batches.
+- Use `./build/ur5_clutter_plan --live-fast` when you want an unpaced fast
+  preview instead of realtime playback.
 - Use `./build/ur5_path_diagnose build/scenes/ur5e_clutter.xml planned_path.csv 128`
   when a visual pass looks suspicious; trust this over eyeballing perspective.

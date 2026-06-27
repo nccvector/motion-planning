@@ -47,8 +47,11 @@ constexpr double kMinOmplSolveAttemptSeconds = 0.020;
 constexpr int kMaxC2RepairIterations = 8;
 constexpr std::size_t kMaxC2SplineKnots = 96;
 constexpr double kMinimumSplineAttemptBudgetSeconds = 0.080;
-constexpr int kCommandSubsteps = 4;
-constexpr int kMaxSettleSteps = 240;
+constexpr double kNominalJointSpeedRadPerSecond = 0.65;
+constexpr double kMinimumExecutionDurationSeconds = 4.0;
+constexpr double kFinalHoldSeconds = 1.0;
+constexpr int kExecutionTraceStride = 16;
+constexpr double kLiveRenderHz = 60.0;
 
 using JointArray = std::array<double, kDof>;
 
@@ -484,6 +487,8 @@ class LivePidViewer {
 
   bool active() const { return active_ && window_ != nullptr && !glfwWindowShouldClose(window_); }
 
+  void ResetClock() { start_wall_time_ = Clock::now(); }
+
   void Pace(double simulation_time) const {
     if (!active()) {
       return;
@@ -611,14 +616,6 @@ double MaxAbsJointError(const JointArray& a, const JointArray& b) {
   return error;
 }
 
-double MaxAbs(const JointArray& values) {
-  double result = 0.0;
-  for (const double value : values) {
-    result = std::max(result, std::abs(value));
-  }
-  return result;
-}
-
 double JointDistance(const JointArray& a, const JointArray& b) {
   double sum = 0.0;
   for (int i = 0; i < kDof; ++i) {
@@ -634,6 +631,37 @@ JointArray BlendJoints(const JointArray& a, const JointArray& b, double t) {
     q[i] = a[i] + t * (b[i] - a[i]);
   }
   return q;
+}
+
+double MaxJointDelta(const JointArray& a, const JointArray& b) {
+  double result = 0.0;
+  for (int i = 0; i < kDof; ++i) {
+    result = std::max(result, std::abs(b[i] - a[i]));
+  }
+  return result;
+}
+
+double EstimateExecutionDuration(const std::vector<JointArray>& path) {
+  double duration = 0.0;
+  for (std::size_t i = 1; i < path.size(); ++i) {
+    duration += MaxJointDelta(path[i - 1], path[i]) / kNominalJointSpeedRadPerSecond;
+  }
+  return std::max(duration, kMinimumExecutionDurationSeconds);
+}
+
+JointArray EvaluateSampledPath(const std::vector<JointArray>& path, double progress) {
+  if (path.empty()) {
+    throw std::runtime_error("Cannot evaluate empty path");
+  }
+  if (path.size() == 1) {
+    return path.front();
+  }
+  const double scaled =
+      std::clamp(progress, 0.0, 1.0) * static_cast<double>(path.size() - 1);
+  const std::size_t segment =
+      std::min<std::size_t>(static_cast<std::size_t>(scaled), path.size() - 2);
+  const double alpha = scaled - static_cast<double>(segment);
+  return BlendJoints(path[segment], path[segment + 1], alpha);
 }
 
 std::vector<JointArray> PathStatesToJoints(const og::PathGeometric& path) {
@@ -1259,64 +1287,155 @@ void ExecutePath(const std::filesystem::path& trace_file,
                  Ur5Scene& scene,
                  const JointArray& home_q,
                  const std::vector<JointArray>& path,
-                 bool live_view) {
+                 bool live_view,
+                 bool live_realtime) {
+  using Clock = std::chrono::steady_clock;
+  const auto execute_start = Clock::now();
   const std::vector<std::array<double, 3>> planned_tool_path = ComputeToolPath(scene, path);
+  const auto tool_path_ready = Clock::now();
   scene.ResetTo(home_q);
   LivePidViewer viewer(scene, planned_tool_path, live_view);
+  const auto viewer_ready = Clock::now();
+  viewer.Render(0, 0);
+  viewer.ResetClock();
   JointArray integral{};
   std::ofstream out(trace_file);
   out << "step,target_index,q0,q1,q2,q3,q4,q5,tool_x,tool_y,tool_z,obstacle_contacts,"
          "clearance_violations,min_obstacle_clearance\n";
+  const auto trace_ready = Clock::now();
 
   int step = 0;
   int contact_steps = 0;
   int clearance_violation_steps = 0;
+  int trace_rows = 0;
+  int rendered_frames = viewer.active() ? 1 : 0;
   double max_tracking_error = 0.0;
   double sum_tracking_error = 0.0;
-  JointArray previous_target = home_q;
-  for (std::size_t target_index = 0; target_index < path.size(); ++target_index) {
-    const JointArray& target = path[target_index];
-    for (int substep = 1; substep <= kCommandSubsteps; ++substep) {
-      const JointArray commanded_target =
-          BlendJoints(previous_target, target, static_cast<double>(substep) / kCommandSubsteps);
-      for (int local_step = 0; local_step < kMaxSettleSteps; ++local_step) {
-        scene.ApplyPidStep(commanded_target, integral);
-        const auto q = scene.CurrentConfiguration();
-        const double tracking_error = MaxAbsJointError(q, commanded_target);
-        max_tracking_error = std::max(max_tracking_error, tracking_error);
-        sum_tracking_error += tracking_error;
-        const int obstacle_contacts = scene.ObstacleContactCount();
-        const int clearance_violations = scene.ObstacleClearanceViolationCount();
-        const double min_obstacle_clearance = scene.MinimumObstacleClearance();
-        contact_steps += obstacle_contacts > 0 ? 1 : 0;
-        clearance_violation_steps += clearance_violations > 0 ? 1 : 0;
-        const auto tool = scene.ToolPosition();
-        out << step << ',' << target_index;
-        for (const double value : q) {
-          out << ',' << value;
-        }
-        out << ',' << tool[0] << ',' << tool[1] << ',' << tool[2] << ',' << obstacle_contacts
-            << ',' << clearance_violations << ',' << min_obstacle_clearance << '\n';
-        ++step;
-        if (MaxAbsJointError(q, commanded_target) < 0.004 &&
-            MaxAbs(scene.CurrentVelocity()) < 0.025) {
-          break;
-        }
-        viewer.Render(target_index, step);
-        viewer.Pace(scene.data()->time);
+  double render_seconds = 0.0;
+  double pace_seconds = 0.0;
+  double csv_seconds = 0.0;
+  double pid_step_seconds = 0.0;
+  double diagnostics_seconds = 0.0;
+  auto next_progress_log = Clock::now() + std::chrono::seconds(1);
+  auto next_render_time = Clock::now();
+  const double trajectory_duration = EstimateExecutionDuration(path);
+  const double total_execution_duration = trajectory_duration + kFinalHoldSeconds;
+  const double timestep = scene.model()->opt.timestep;
+  const int total_control_steps =
+      static_cast<int>(std::ceil(total_execution_duration / timestep));
+  for (int control_step = 0; control_step <= total_control_steps; ++control_step) {
+    const double elapsed_sim_time = static_cast<double>(control_step) * timestep;
+    const bool holding_final_target = elapsed_sim_time >= trajectory_duration;
+    const double command_time = std::min(elapsed_sim_time, trajectory_duration);
+    const double progress = trajectory_duration > 0.0 ? command_time / trajectory_duration : 1.0;
+    const JointArray commanded_target =
+        holding_final_target ? path.back() : EvaluateSampledPath(path, progress);
+    const std::size_t target_index = std::min<std::size_t>(
+        static_cast<std::size_t>(progress * static_cast<double>(path.size() - 1)),
+        path.size() - 1);
+
+    const auto pid_step_start = Clock::now();
+    scene.ApplyPidStep(commanded_target, integral);
+    const auto pid_step_end = Clock::now();
+    pid_step_seconds += std::chrono::duration<double>(pid_step_end - pid_step_start).count();
+
+    const auto diagnostics_start = Clock::now();
+    const auto q = scene.CurrentConfiguration();
+    const double tracking_error = MaxAbsJointError(q, commanded_target);
+    max_tracking_error = std::max(max_tracking_error, tracking_error);
+    sum_tracking_error += tracking_error;
+    const int obstacle_contacts = scene.ObstacleContactCount();
+    contact_steps += obstacle_contacts > 0 ? 1 : 0;
+    const auto diagnostics_end = Clock::now();
+    diagnostics_seconds +=
+        std::chrono::duration<double>(diagnostics_end - diagnostics_start).count();
+
+    const bool final_step = control_step == total_control_steps;
+    const bool should_record_trace =
+        step % kExecutionTraceStride == 0 || obstacle_contacts > 0 || final_step;
+    if (should_record_trace) {
+      const auto csv_start = Clock::now();
+      const int clearance_violations = scene.ObstacleClearanceViolationCount();
+      const double min_obstacle_clearance = scene.MinimumObstacleClearance();
+      clearance_violation_steps += clearance_violations > 0 ? 1 : 0;
+      const auto tool = scene.ToolPosition();
+      out << step << ',' << target_index;
+      for (const double value : q) {
+        out << ',' << value;
       }
+      out << ',' << tool[0] << ',' << tool[1] << ',' << tool[2] << ',' << obstacle_contacts
+          << ',' << clearance_violations << ',' << min_obstacle_clearance << '\n';
+      ++trace_rows;
+      const auto csv_end = Clock::now();
+      csv_seconds += std::chrono::duration<double>(csv_end - csv_start).count();
     }
-    previous_target = target;
+
+    ++step;
+
+    const auto now = Clock::now();
+    if (viewer.active() && now >= next_render_time) {
+      const auto render_start = Clock::now();
+      viewer.Render(target_index, step);
+      const auto render_end = Clock::now();
+      if (viewer.active()) {
+        ++rendered_frames;
+      }
+      render_seconds += std::chrono::duration<double>(render_end - render_start).count();
+      next_render_time = now + std::chrono::duration_cast<Clock::duration>(
+                                   std::chrono::duration<double>(1.0 / kLiveRenderHz));
+    }
+
+    if (live_realtime) {
+      const auto pace_start = Clock::now();
+      viewer.Pace(scene.data()->time);
+      const auto pace_end = Clock::now();
+      pace_seconds += std::chrono::duration<double>(pace_end - pace_start).count();
+    }
+
+    if (now >= next_progress_log) {
+      std::cout << "PID progress: target " << (target_index + 1) << "/" << path.size()
+                << ", trajectory time " << std::fixed << std::setprecision(2) << command_time
+                << "/" << trajectory_duration << " s, executed steps " << step << ", sim time "
+                << scene.data()->time << " s\n"
+                << std::defaultfloat << std::setprecision(6);
+      next_progress_log = now + std::chrono::seconds(1);
+    }
   }
 
+  const auto execute_end = Clock::now();
   const double final_error = MaxAbsJointError(scene.CurrentConfiguration(), path.back());
   const double mean_tracking_error = step > 0 ? sum_tracking_error / step : 0.0;
+  const double tool_path_ms =
+      std::chrono::duration<double, std::milli>(tool_path_ready - execute_start).count();
+  const double viewer_setup_ms =
+      std::chrono::duration<double, std::milli>(viewer_ready - tool_path_ready).count();
+  const double trace_setup_ms =
+      std::chrono::duration<double, std::milli>(trace_ready - viewer_ready).count();
+  const double total_ms =
+      std::chrono::duration<double, std::milli>(execute_end - execute_start).count();
+  std::cout << "PID timing total: " << total_ms << " ms\n";
+  std::cout << "PID timing planned tool path: " << tool_path_ms << " ms\n";
+  std::cout << "PID timing live viewer setup: " << viewer_setup_ms << " ms\n";
+  std::cout << "PID timing trace setup: " << trace_setup_ms << " ms\n";
+  std::cout << "PID timing mj_step: " << (pid_step_seconds * 1000.0) << " ms\n";
+  std::cout << "PID timing clearance/diagnostics: " << (diagnostics_seconds * 1000.0) << " ms\n";
+  std::cout << "PID timing CSV writes: " << (csv_seconds * 1000.0) << " ms\n";
+  std::cout << "PID timing live render: " << (render_seconds * 1000.0) << " ms\n";
+  std::cout << "PID timing realtime pacing sleep: " << (pace_seconds * 1000.0) << " ms\n";
+  std::cout << "PID trajectory duration: " << trajectory_duration << " s\n";
+  std::cout << "PID final hold duration: " << kFinalHoldSeconds << " s\n";
   std::cout << "PID execution steps: " << step << '\n';
+  std::cout << "PID trace rows written: " << trace_rows << '\n';
+  std::cout << "PID trace stride: " << kExecutionTraceStride << '\n';
+  std::cout << "PID simulated time: " << scene.data()->time << " s\n";
+  std::cout << "MuJoCo timestep: " << scene.model()->opt.timestep << " s\n";
+  std::cout << "PID rendered frames: " << rendered_frames << '\n';
+  std::cout << "PID live realtime pacing: " << std::boolalpha << live_realtime << '\n';
   std::cout << "PID final max joint error: " << final_error << " rad\n";
   std::cout << "PID mean waypoint tracking error: " << mean_tracking_error << " rad\n";
   std::cout << "PID max waypoint tracking error: " << max_tracking_error << " rad\n";
   std::cout << "PID obstacle-contact steps: " << contact_steps << '\n';
-  std::cout << "PID clearance-violation steps: " << clearance_violation_steps << '\n';
+  std::cout << "PID clearance-violation trace rows: " << clearance_violation_steps << '\n';
 
   if (final_error > 0.20) {
     throw std::runtime_error("PID controller did not reach the final planned target closely enough");
@@ -1356,15 +1475,24 @@ void ReportRingPassage(Ur5Scene& scene, const std::vector<JointArray>& path) {
 
 int main(int argc, char** argv) {
   bool live_view = true;
+  bool live_realtime = true;
   std::optional<std::filesystem::path> scene_arg;
   for (int i = 1; i < argc; ++i) {
     const std::string_view arg(argv[i]);
     if (arg == "--no-live") {
       live_view = false;
+      live_realtime = false;
     } else if (arg == "--live") {
       live_view = true;
+    } else if (arg == "--live-realtime") {
+      live_view = true;
+      live_realtime = true;
+    } else if (arg == "--live-fast") {
+      live_view = true;
+      live_realtime = false;
     } else if (arg == "--help" || arg == "-h") {
-      std::cout << "Usage: " << argv[0] << " [--live|--no-live] [scene.xml]\n";
+      std::cout << "Usage: " << argv[0]
+                << " [--live|--live-fast|--live-realtime|--no-live] [scene.xml]\n";
       return 0;
     } else if (!scene_arg.has_value()) {
       scene_arg = std::filesystem::path(arg);
@@ -1383,6 +1511,7 @@ int main(int argc, char** argv) {
     std::cout << "Robot model: " << scene.robot_label() << '\n';
     std::cout << "Control mode: " << scene.ControlModeLabel() << '\n';
     std::cout << "Live PID viewer: " << std::boolalpha << live_view << '\n';
+    std::cout << "Live PID realtime pacing: " << std::boolalpha << live_realtime << '\n';
     std::cout << "MuJoCo model: nq=" << scene.model()->nq << " nv=" << scene.model()->nv
               << " nu=" << scene.model()->nu << '\n';
 
@@ -1397,7 +1526,7 @@ int main(int argc, char** argv) {
     ReportRingPassage(scene, path);
 
     WritePlannedPath("planned_path.csv", scene, path);
-    ExecutePath("executed_trace.csv", scene, home, path, live_view);
+    ExecutePath("executed_trace.csv", scene, home, path, live_view, live_realtime);
 
     const auto final_tool = scene.ToolPosition();
     std::cout << "Final tool position: [" << std::fixed << std::setprecision(3)
