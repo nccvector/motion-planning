@@ -325,6 +325,26 @@
   - `cmake --build build --target ur5_clutter_plan ur5_goal_loop_demo`,
   - `./build/ur5_goal_loop_demo --help`,
   - `./build/ur5_clutter_plan --no-live`.
+- Pinned execution to an explicit 60 Hz control/simulation loop:
+  - both `ur5_clutter_plan` and `ur5_goal_loop_demo` set MuJoCo execution
+    timestep to `1/60 s`,
+  - each control tick computes the desired path state, applies one PID/servo
+    update, advances MuJoCo once, and sleeps the remaining wall time in
+    realtime mode,
+  - `--live-fast` still skips the sleep for quick preview/debug runs.
+- Verified after the 60 Hz control/simulation change:
+  - `cmake --build build --target ur5_clutter_plan ur5_goal_loop_demo`,
+  - `./build/ur5_clutter_plan --no-live`,
+  - `MuJoCo timestep: 0.0166667 s`,
+  - PID execution steps: `365`,
+  - PID final max joint error: `0.0207284 rad`,
+  - PID obstacle-contact steps: `0`,
+  - PID clearance-violation trace rows: `0`,
+  - `./build/ur5_path_replay --check build/scenes/ur5e_clutter.xml executed_trace.csv`,
+  - `./build/ur5_path_diagnose build/scenes/ur5e_clutter.xml planned_path.csv 128`
+    found 0 contacts, 0 negative robot-ring distances, and closest red-ring
+    distance `0.020968 m`,
+  - `./build/ur5_goal_loop_demo --help`.
 
 ## Next
 

@@ -57,9 +57,10 @@ cmake --build build -j
 
 This plans the path, opens a live MuJoCo window for the PID execution preview,
 and still writes `planned_path.csv` and `executed_trace.csv`. The PID controller
-runs as a fixed-rate realtime control loop: each MuJoCo timestep computes the
-desired point along the time-parametrized path, applies one control update, and
-advances the simulation once.
+runs as a 60 Hz realtime control loop: each tick computes the desired point
+along the time-parametrized path, applies one control update, advances MuJoCo
+once with a `1/60 s` timestep, and sleeps any remaining wall time in realtime
+mode.
 
 Optional scene argument:
 
@@ -91,7 +92,7 @@ goal on a separate planning scene/thread, and then executes the result with the
 PID controller on the visible scene. It does not write CSV files. The overlay
 shows planning progress, retry attempt, selected path kind (`C2 spline smoothed
 path` or linear fallback), planning time, OMPL solve attempts, spline repair
-iterations, and PID execution progress. If all 4 planning retries fail for a
+iterations, and 60 Hz PID execution progress. If all 4 planning retries fail for a
 segment, the program stops and prints the exact start/goal joint vectors for
 reproducing that pair in a smaller experiment.
 

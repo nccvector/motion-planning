@@ -56,6 +56,8 @@ constexpr double kMinimumExecutionDurationSeconds = 4.0;
 constexpr double kFinalHoldSeconds = 1.0;
 constexpr int kExecutionTraceStride = 16;
 constexpr double kLiveRenderHz = 60.0;
+constexpr double kControlHz = 60.0;
+constexpr double kControlPeriodSeconds = 1.0 / kControlHz;
 
 using JointArray = std::array<double, kDof>;
 
@@ -317,6 +319,8 @@ class Ur5Scene {
     }
     return pairs;
   }
+
+  void SetSimulationTimestep(double timestep) { model_->opt.timestep = timestep; }
 
   void ApplyPidStep(const JointArray& target, JointArray& integral) {
     const double dt = model_->opt.timestep;
@@ -1336,9 +1340,11 @@ void ExecutePath(const std::filesystem::path& trace_file,
   auto next_render_time = Clock::now();
   const double trajectory_duration = EstimateExecutionDuration(path);
   const double total_execution_duration = trajectory_duration + kFinalHoldSeconds;
-  const double timestep = scene.model()->opt.timestep;
+  scene.SetSimulationTimestep(kControlPeriodSeconds);
+  const double timestep = kControlPeriodSeconds;
   const int total_control_steps =
       static_cast<int>(std::ceil(total_execution_duration / timestep));
+  const auto control_start_wall_time = Clock::now();
   for (int control_step = 0; control_step <= total_control_steps; ++control_step) {
     const double elapsed_sim_time = static_cast<double>(control_step) * timestep;
     const bool holding_final_target = elapsed_sim_time >= trajectory_duration;
@@ -1403,7 +1409,14 @@ void ExecutePath(const std::filesystem::path& trace_file,
 
     if (live_realtime) {
       const auto pace_start = Clock::now();
-      viewer.Pace(scene.data()->time);
+      const auto target_time = control_start_wall_time +
+                               std::chrono::duration_cast<Clock::duration>(
+                                   std::chrono::duration<double>(
+                                       static_cast<double>(control_step + 1) * timestep));
+      const auto before_sleep = Clock::now();
+      if (target_time > before_sleep) {
+        std::this_thread::sleep_until(target_time);
+      }
       const auto pace_end = Clock::now();
       pace_seconds += std::chrono::duration<double>(pace_end - pace_start).count();
     }

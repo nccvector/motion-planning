@@ -188,8 +188,10 @@ void ExecuteLoopPath(Ur5Scene& scene,
   auto next_render_time = Clock::now();
   const double trajectory_duration = EstimateExecutionDuration(plan.path);
   const double total_execution_duration = trajectory_duration + kFinalHoldSeconds;
-  const double timestep = scene.model()->opt.timestep;
+  scene.SetSimulationTimestep(kControlPeriodSeconds);
+  const double timestep = kControlPeriodSeconds;
   const int total_control_steps = static_cast<int>(std::ceil(total_execution_duration / timestep));
+  const auto control_start_wall_time = Clock::now();
 
   for (int control_step = 0; control_step <= total_control_steps && viewer.active(); ++control_step) {
     const double elapsed_sim_time = static_cast<double>(control_step) * timestep;
@@ -220,7 +222,14 @@ void ExecuteLoopPath(Ur5Scene& scene,
     }
 
     if (live_realtime) {
-      viewer.Pace(scene.data()->time);
+      const auto target_time = control_start_wall_time +
+                               std::chrono::duration_cast<Clock::duration>(
+                                   std::chrono::duration<double>(
+                                       static_cast<double>(control_step + 1) * timestep));
+      const auto before_sleep = Clock::now();
+      if (target_time > before_sleep) {
+        std::this_thread::sleep_until(target_time);
+      }
     }
   }
 
