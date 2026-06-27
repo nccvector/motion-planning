@@ -56,7 +56,7 @@ constexpr double kMinimumExecutionDurationSeconds = 4.0;
 constexpr double kFinalHoldSeconds = 1.0;
 constexpr int kExecutionTraceStride = 16;
 constexpr double kLiveRenderHz = 60.0;
-constexpr double kControlHz = 60.0;
+constexpr double kControlHz = 90.0;
 constexpr double kControlPeriodSeconds = 1.0 / kControlHz;
 
 using JointArray = std::array<double, kDof>;
@@ -210,11 +210,7 @@ class Ur5Scene {
   }
 
   void SetConfiguration(const JointArray& q) {
-    for (int i = 0; i < kDof; ++i) {
-      data_->qpos[qpos_addr_[i]] = q[i];
-      data_->qvel[qvel_addr_[i]] = 0.0;
-    }
-    mj_forward(model_.get(), data_.get());
+    SetConfigurationOnData(q, data_.get());
   }
 
   JointArray CurrentConfiguration() const {
@@ -321,6 +317,17 @@ class Ur5Scene {
   }
 
   void SetSimulationTimestep(double timestep) { model_->opt.timestep = timestep; }
+
+  void SetConfigurationOnData(const JointArray& q, mjData* data) const {
+    mj_resetData(model_.get(), data);
+    for (int i = 0; i < kDof; ++i) {
+      data->qpos[qpos_addr_[i]] = q[i];
+      data->qvel[qvel_addr_[i]] = 0.0;
+    }
+    mj_forward(model_.get(), data);
+  }
+
+  const std::vector<int>& robot_collision_geoms() const { return robot_collision_geoms_; }
 
   void ApplyPidStep(const JointArray& target, JointArray& integral) {
     const double dt = model_->opt.timestep;
@@ -486,11 +493,19 @@ class LivePidViewer {
     mjv_makeScene(scene_.model(), &mjv_scene_, 4000);
     mjr_makeContext(scene_.model(), &context_, mjFONTSCALE_150);
     interactive_camera_.Attach(window_, scene_.model(), &mjv_scene_, &camera_);
+    goal_ghost_data_ = mj_makeData(scene_.model());
+    if (goal_ghost_data_ == nullptr) {
+      std::cerr << "warning: goal ghost disabled because MuJoCo data allocation failed\n";
+    }
     start_wall_time_ = Clock::now();
     active_ = true;
   }
 
   ~LivePidViewer() {
+    if (goal_ghost_data_ != nullptr) {
+      mj_deleteData(goal_ghost_data_);
+      goal_ghost_data_ = nullptr;
+    }
     if (!active_) {
       return;
     }
@@ -536,6 +551,7 @@ class LivePidViewer {
     ur5vis::ApplyRobotGeometryMode(&option_, show_collision_model_);
     mjv_updateScene(scene_.model(), scene_.data(), &option_, nullptr, &camera_, mjCAT_ALL,
                     &mjv_scene_);
+    AddGoalGhost();
     const auto current_tool = scene_.ToolPosition();
     ur5vis::AddToolPathMarkers(&mjv_scene_, planned_tool_path_, &current_tool);
     mjr_render(viewport, &mjv_scene_, &context_);
@@ -563,6 +579,7 @@ class LivePidViewer {
     ur5vis::ApplyRobotGeometryMode(&option_, show_collision_model_);
     mjv_updateScene(scene_.model(), scene_.data(), &option_, nullptr, &camera_, mjCAT_ALL,
                     &mjv_scene_);
+    AddGoalGhost();
     const auto current_tool = scene_.ToolPosition();
     ur5vis::AddToolPathMarkers(&mjv_scene_, planned_tool_path_, &current_tool);
     mjr_render(viewport, &mjv_scene_, &context_);
@@ -575,8 +592,21 @@ class LivePidViewer {
     planned_tool_path_ = std::move(planned_tool_path);
   }
 
+  void SetGoalGhost(const std::optional<JointArray>& goal_q) { goal_ghost_q_ = goal_q; }
+
  private:
   using Clock = std::chrono::steady_clock;
+
+  void AddGoalGhost() {
+    if (!goal_ghost_q_.has_value() || goal_ghost_data_ == nullptr) {
+      return;
+    }
+    scene_.SetConfigurationOnData(*goal_ghost_q_, goal_ghost_data_);
+    ur5vis::AddGoalGhostGeoms(&mjv_scene_,
+                              scene_.model(),
+                              goal_ghost_data_,
+                              scene_.robot_collision_geoms());
+  }
 
   void RenderOverlay(mjrRect viewport, std::size_t target_index, int step) {
     std::ostringstream left;
@@ -597,6 +627,8 @@ class LivePidViewer {
   mjvScene mjv_scene_{};
   mjrContext context_{};
   ur5vis::InteractiveCamera interactive_camera_;
+  mjData* goal_ghost_data_ = nullptr;
+  std::optional<JointArray> goal_ghost_q_;
   Clock::time_point start_wall_time_{};
   bool active_ = false;
   bool show_collision_model_ = true;

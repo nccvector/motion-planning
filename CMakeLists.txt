@@ -144,6 +144,23 @@ target_compile_definitions(ur5_goal_loop_demo
     UR5_MUJOCO_OMPL_DEFAULT_SCENE="${CMAKE_CURRENT_BINARY_DIR}/scenes/ur5e_clutter.xml"
 )
 
+add_executable(ur5_goal_monte_carlo
+  src/ur5_goal_monte_carlo.cpp
+  src/ur5_clutter_core.hpp
+  src/ur5_visualization.hpp
+)
+target_compile_features(ur5_goal_monte_carlo PRIVATE cxx_std_23)
+target_link_libraries(ur5_goal_monte_carlo
+  PRIVATE
+    ${UR5_MUJOCO_TARGET}
+    ${UR5_OMPL_TARGET}
+    glfw
+)
+target_compile_definitions(ur5_goal_monte_carlo
+  PRIVATE
+    UR5_MUJOCO_OMPL_DEFAULT_SCENE="${CMAKE_CURRENT_BINARY_DIR}/scenes/ur5e_clutter.xml"
+)
+
 add_executable(ur5_path_replay
   src/ur5_path_replay.cpp
   src/ur5_visualization.hpp
@@ -175,11 +192,13 @@ target_compile_definitions(ur5_path_diagnose
 if(MSVC)
   target_compile_options(ur5_clutter_plan PRIVATE /W4)
   target_compile_options(ur5_goal_loop_demo PRIVATE /W4)
+  target_compile_options(ur5_goal_monte_carlo PRIVATE /W4)
   target_compile_options(ur5_path_replay PRIVATE /W4)
   target_compile_options(ur5_path_diagnose PRIVATE /W4)
 else()
   target_compile_options(ur5_clutter_plan PRIVATE -Wall -Wextra -Wpedantic)
   target_compile_options(ur5_goal_loop_demo PRIVATE -Wall -Wextra -Wpedantic -Wno-unused-function)
+  target_compile_options(ur5_goal_monte_carlo PRIVATE -Wall -Wextra -Wpedantic -Wno-unused-function)
   target_compile_options(ur5_path_replay PRIVATE -Wall -Wextra -Wpedantic)
   target_compile_options(ur5_path_diagnose PRIVATE -Wall -Wextra -Wpedantic)
 endif()

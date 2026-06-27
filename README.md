@@ -31,12 +31,19 @@ This project is intentionally separate from `projects/ros2-learning`.
   - replays `planned_path.csv` or `executed_trace.csv`,
   - shows the tool path and current tool position in a native MuJoCo/GLFW window.
 - A C++23 executable, `ur5_goal_loop_demo`, that:
-  - cycles through a small list of valid joint-space goals,
+  - cycles through 20 Monte Carlo-selected valid joint-space goals,
+  - alternates between 10 red-ring approach-side goals and 10 shelf-side goals,
   - plans each next segment on a separate planning scene/thread while the viewer
     stays responsive,
-  - retries failed planning segments up to 4 times,
+  - retries failed planning segments up to 5 times,
+  - shows the current target posture as a translucent green robot ghost,
   - executes each accepted segment with the same PID controller without writing
     long-running CSV traces.
+- A C++23 executable, `ur5_goal_monte_carlo`, that:
+  - runs deterministic Monte Carlo exploration of valid states in the current
+    scene,
+  - ranks approach-side and shelf-side goals,
+  - prints a C++ initializer for an alternating 20-goal loop list.
 - A C++23 executable, `ur5_path_diagnose`, that:
   - checks robot collision geometry against the red ring along a saved CSV path,
   - samples between adjacent CSV rows to catch interpolation/grazing issues.
@@ -57,9 +64,9 @@ cmake --build build -j
 
 This plans the path, opens a live MuJoCo window for the PID execution preview,
 and still writes `planned_path.csv` and `executed_trace.csv`. The PID controller
-runs as a 60 Hz realtime control loop: each tick computes the desired point
+runs as a 90 Hz realtime control loop: each tick computes the desired point
 along the time-parametrized path, applies one control update, advances MuJoCo
-once with a `1/60 s` timestep, and sleeps any remaining wall time in realtime
+once with a `1/90 s` timestep, and sleeps any remaining wall time in realtime
 mode.
 
 Optional scene argument:
@@ -92,9 +99,23 @@ goal on a separate planning scene/thread, and then executes the result with the
 PID controller on the visible scene. It does not write CSV files. The overlay
 shows planning progress, retry attempt, selected path kind (`C2 spline smoothed
 path` or linear fallback), planning time, OMPL solve attempts, spline repair
-iterations, and 60 Hz PID execution progress. If all 4 planning retries fail for a
-segment, the program stops and prints the exact start/goal joint vectors for
-reproducing that pair in a smaller experiment.
+iterations, spline-fit success/fallback status, and 90 Hz PID execution
+progress. The translucent green robot shows the current goal posture. If all 5
+planning retries fail for a segment, the program stops and prints the exact
+start/goal joint vectors for reproducing that pair in a smaller experiment.
+
+Goal-list checks:
+
+```bash
+./build/ur5_goal_loop_demo --check-goals
+./build/ur5_goal_loop_demo --check-transitions
+```
+
+Regenerate Monte Carlo candidates:
+
+```bash
+./build/ur5_goal_monte_carlo
+```
 
 The planner rejects actual obstacle contacts. OMPL state validity and final path
 acceptance use a 1.5 cm clearance margin between robot collision geometry and

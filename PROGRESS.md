@@ -345,6 +345,43 @@
     found 0 contacts, 0 negative robot-ring distances, and closest red-ring
     distance `0.020968 m`,
   - `./build/ur5_goal_loop_demo --help`.
+- Added Monte Carlo loop-goal search and a larger verified loop:
+  - added `src/ur5_goal_monte_carlo.cpp` and the `ur5_goal_monte_carlo` target,
+  - the search samples valid states in the current MuJoCo scene, ranks
+    red-ring approach-side goals and shelf-side goals separately, and prints a
+    C++ initializer for an alternating 20-goal loop list,
+  - the final loop list contains 20 goals: 10 needle-side and 10 shelf-side,
+    alternating,
+  - all 10 shelf-side goals have tool positions beyond the ring on the shelf
+    side, with representative x positions from about `-0.61 m` to `-0.69 m`,
+  - added `--check-goals` and `--check-transitions` to `ur5_goal_loop_demo`,
+  - `--check-transitions` verified all 20 loop edges, and every checked edge
+    planned as `C2 spline smoothed path`.
+- Updated loop visualization/status:
+  - added a translucent green target robot ghost for the goal currently being
+    planned/executed,
+  - execution status now explicitly shows `Spline fit: success` or
+    `Spline fit: failed; using linear fallback`,
+  - max loop planning attempts increased from 4 to 5.
+- Changed the shared realtime execution loop from 60 Hz to 90 Hz:
+  - execution timestep is now `1/90 s`,
+  - each tick still computes the current trajectory target, applies one
+    PID/servo update, advances MuJoCo once, and sleeps remaining wall time in
+    realtime mode.
+- Verified after the Monte Carlo/loop/90 Hz change:
+  - `cmake -S . -B build -DCMAKE_BUILD_TYPE=Release`,
+  - `cmake --build build --target ur5_clutter_plan ur5_goal_loop_demo ur5_goal_monte_carlo`,
+  - `./build/ur5_goal_monte_carlo`,
+  - `./build/ur5_goal_loop_demo --check-goals`,
+  - `./build/ur5_goal_loop_demo --check-transitions`,
+  - `./build/ur5_clutter_plan --no-live`,
+  - `MuJoCo timestep: 0.0111111 s`,
+  - PID execution steps: `530`,
+  - PID obstacle-contact steps: `0`,
+  - `./build/ur5_path_replay --check build/scenes/ur5e_clutter.xml executed_trace.csv`,
+  - `./build/ur5_path_diagnose build/scenes/ur5e_clutter.xml planned_path.csv 128`
+    found 0 contacts, 0 negative robot-ring distances, and closest red-ring
+    distance `0.025195 m`.
 
 ## Next
 
@@ -352,6 +389,9 @@
   after planning.
 - Run `./build/ur5_goal_loop_demo` to watch the endless goal-to-goal realtime
   planning/execution loop.
+- Use `./build/ur5_goal_loop_demo --check-transitions` after changing the loop
+  goal list.
+- Use `./build/ur5_goal_monte_carlo` to regenerate candidate loop goals.
 - Use `./build/ur5_clutter_plan --no-live` for repeated planner/debug batches.
 - Use `./build/ur5_clutter_plan --live-fast` when you want an unpaced fast
   preview instead of realtime playback.

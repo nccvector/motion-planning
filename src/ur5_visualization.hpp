@@ -6,6 +6,7 @@
 #include <algorithm>
 #include <array>
 #include <cstddef>
+#include <cstring>
 #include <vector>
 
 namespace ur5vis {
@@ -59,6 +60,32 @@ inline void AddToolPathMarkers(mjvScene* scene, const std::vector<std::array<dou
     const mjtNum pos[3] = {(*current_point)[0], (*current_point)[1], (*current_point)[2]};
     mjv_initGeom(&scene->geoms[scene->ngeom], mjGEOM_SPHERE, size, pos, kIdentity, kCurrentRgba);
     scene->geoms[scene->ngeom].category = mjCAT_DECOR;
+    ++scene->ngeom;
+  }
+}
+
+inline void AddGoalGhostGeoms(mjvScene* scene,
+                              const mjModel* model,
+                              const mjData* ghost_data,
+                              const std::vector<int>& ghost_geom_ids) {
+  constexpr float kGhostRgba[4] = {0.0F, 1.0F, 0.55F, 0.28F};
+  for (const int geom_id : ghost_geom_ids) {
+    if (scene->ngeom >= scene->maxgeom) {
+      return;
+    }
+    mjvGeom& geom = scene->geoms[scene->ngeom];
+    mjv_initGeom(&geom,
+                 static_cast<mjtGeom>(model->geom_type[geom_id]),
+                 &model->geom_size[3 * geom_id],
+                 ghost_data->geom_xpos + 3 * geom_id,
+                 ghost_data->geom_xmat + 9 * geom_id,
+                 kGhostRgba);
+    geom.category = mjCAT_DECOR;
+    geom.objtype = mjOBJ_GEOM;
+    geom.objid = geom_id;
+    geom.segid = -1;
+    std::strncpy(geom.label, "goal", sizeof(geom.label) - 1);
+    geom.label[sizeof(geom.label) - 1] = '\0';
     ++scene->ngeom;
   }
 }
