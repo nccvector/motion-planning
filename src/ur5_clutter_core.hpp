@@ -8,7 +8,6 @@
 #include <ompl/base/spaces/RealVectorStateSpace.h>
 #include <ompl/geometric/PathGeometric.h>
 #include <ompl/geometric/SimpleSetup.h>
-#include <ompl/geometric/planners/prm/SPARStwo.h>
 #include <ompl/geometric/planners/rrt/InformedRRTstar.h>
 #include <ompl/geometric/planners/rrt/RRTConnect.h>
 #include <ompl/util/RandomNumbers.h>
@@ -133,7 +132,7 @@ struct PlanResult {
 enum class PlannerKind {
   kRrtConnect,
   kInformedRrtStar,
-  kSpars2,
+  kExperienceRrtConnect,
 };
 
 std::string_view PlannerName(PlannerKind planner_kind) {
@@ -142,8 +141,8 @@ std::string_view PlannerName(PlannerKind planner_kind) {
       return "RRTConnect";
     case PlannerKind::kInformedRrtStar:
       return "InformedRRTstar";
-    case PlannerKind::kSpars2:
-      return "SPARS2";
+    case PlannerKind::kExperienceRrtConnect:
+      return "RRTConnectExperience";
   }
   return "unknown";
 }
@@ -786,6 +785,36 @@ double EstimateExecutionDuration(const std::vector<JointArray>& path) {
   return std::max(duration, kMinimumExecutionDurationSeconds);
 }
 
+void OrientPathToRequestedEndpoints(std::vector<JointArray>& path,
+                                    std::vector<JointArray>& reusable_path_knots,
+                                    const JointArray& requested_start,
+                                    const JointArray& requested_goal) {
+  constexpr double kEndpointTolerance = 0.08;
+  if (path.empty()) {
+    throw std::runtime_error("Planner returned an empty executable path");
+  }
+
+  const double start_error = MaxJointDelta(path.front(), requested_start);
+  const double goal_error = MaxJointDelta(path.back(), requested_goal);
+  if (start_error <= kEndpointTolerance && goal_error <= kEndpointTolerance) {
+    return;
+  }
+
+  const double reversed_start_error = MaxJointDelta(path.front(), requested_goal);
+  const double reversed_goal_error = MaxJointDelta(path.back(), requested_start);
+  if (reversed_start_error <= kEndpointTolerance && reversed_goal_error <= kEndpointTolerance) {
+    std::reverse(path.begin(), path.end());
+    std::reverse(reusable_path_knots.begin(), reusable_path_knots.end());
+    return;
+  }
+
+  throw std::runtime_error(
+      "Planner executable path endpoints do not match requested query; start_error=" +
+      std::to_string(start_error) + ", goal_error=" + std::to_string(goal_error) +
+      ", reversed_start_error=" + std::to_string(reversed_start_error) +
+      ", reversed_goal_error=" + std::to_string(reversed_goal_error));
+}
+
 JointArray EvaluateSampledPath(const std::vector<JointArray>& path, double progress) {
   if (path.empty()) {
     throw std::runtime_error("Cannot evaluate empty path");
@@ -1272,7 +1301,7 @@ std::shared_ptr<ob::RealVectorStateSpace> MakePlanningStateSpace(
     bounds.setHigh(i, hi);
   }
   space->setBounds(bounds);
-  space->setLongestValidSegmentFraction(0.004);
+  space->setLongestValidSegmentFraction(0.001);
   if (use_goal_biased_sampler) {
     space->setStateSamplerAllocator([goal_q](const ob::StateSpace* sampler_space) {
       return std::make_shared<GoalBiasedStateSampler>(sampler_space, goal_q, kGoalSampleBias);
@@ -1290,15 +1319,6 @@ ob::PlannerPtr MakePlanner(const ob::SpaceInformationPtr& space_information,
     rrt_star->setDelayCC(true);
     return rrt_star;
   }
-  if (planner_kind == PlannerKind::kSpars2) {
-    auto spars2 = std::make_shared<og::SPARStwo>(space_information);
-    spars2->setSparseDeltaFraction(0.045);
-    spars2->setDenseDeltaFraction(0.004);
-    spars2->setStretchFactor(2.0);
-    spars2->setMaxFailures(20000);
-    return spars2;
-  }
-
   auto rrt_connect = std::make_shared<og::RRTConnect>(space_information);
   rrt_connect->setRange(0.35);
   return rrt_connect;
@@ -1318,6 +1338,8 @@ void SetStartAndGoal(og::SimpleSetup& setup,
 PlanResult FinalizeGeometricPath(Ur5Scene& scene,
                                  og::SimpleSetup& setup,
                                  const og::PathGeometric& raw_path,
+                                 const JointArray& requested_start,
+                                 const JointArray& requested_goal,
                                  PlannerKind planner_kind,
                                  std::string_view path_source,
                                  bool exact_solution,
@@ -1418,6 +1440,8 @@ PlanResult FinalizeGeometricPath(Ur5Scene& scene,
     }
   }
 
+  OrientPathToRequestedEndpoints(planned_path, reusable_path_knots, requested_start, requested_goal);
+
   const int final_planning_clearance_violations =
       JointPathClearanceViolationCount(scene, planned_path, kPlanningObstacleClearance);
   const int final_hard_clearance_violations =
@@ -1490,14 +1514,18 @@ PlanResult FinalizeGeometricPath(Ur5Scene& scene,
 PlanResult RunPlanPipeline(Ur5Scene& scene,
                            og::SimpleSetup& setup,
                            const ob::PlannerPtr& planner,
+                           const JointArray& requested_start,
+                           const JointArray& requested_goal,
                            PlannerKind planner_kind,
                            bool preserve_planner_between_attempts = false,
-                           std::string_view path_source = "fresh OMPL solve") {
+                           std::string_view path_source = "fresh OMPL solve",
+                           double planning_budget_seconds = kPlanningTimeBudgetSeconds,
+                           double sampler_goal_bias = kGoalSampleBias) {
   using Clock = std::chrono::steady_clock;
   const auto start_time = Clock::now();
   const auto deadline =
       start_time + std::chrono::duration_cast<Clock::duration>(
-                       std::chrono::duration<double>(kPlanningTimeBudgetSeconds));
+                       std::chrono::duration<double>(planning_budget_seconds));
   auto remaining_seconds = [&]() {
     return std::chrono::duration<double>(deadline - Clock::now()).count();
   };
@@ -1534,28 +1562,37 @@ PlanResult RunPlanPipeline(Ur5Scene& scene,
     }
   }
   if (!exact_solution) {
-    throw std::runtime_error(
-        "OMPL did not find an exact path inside the 3000 ms budget; refusing partial fallback");
+    std::ostringstream message;
+    message << "OMPL did not find an exact path inside the " << std::fixed
+            << std::setprecision(0) << planning_budget_seconds * 1000.0
+            << " ms budget; refusing partial fallback";
+    throw std::runtime_error(message.str());
   }
 
   return FinalizeGeometricPath(scene,
                                setup,
                                setup.getSolutionPath(),
+                               requested_start,
+                               requested_goal,
                                planner_kind,
                                path_source,
                                exact_solution,
                                solve_attempts,
                                approximate_attempts,
                                start_time,
-                               deadline);
+                               deadline,
+                               sampler_goal_bias);
 }
 
 PlanResult PlanPath(Ur5Scene& scene,
                     const JointArray& home_q,
                     const JointArray& goal_q,
-                    PlannerKind planner_kind = PlannerKind::kRrtConnect) {
+                    PlannerKind planner_kind = PlannerKind::kRrtConnect,
+                    std::string_view path_source = "fresh OMPL solve",
+                    double planning_budget_seconds = kPlanningTimeBudgetSeconds,
+                    bool preserve_planner_between_attempts = false) {
   auto space =
-      MakePlanningStateSpace(scene, goal_q, planner_kind != PlannerKind::kSpars2);
+      MakePlanningStateSpace(scene, goal_q, planner_kind != PlannerKind::kExperienceRrtConnect);
   og::SimpleSetup setup(space);
   setup.setStateValidityChecker([&scene](const ob::State* state) {
     return scene.IsStateValid(StateToJoints(state));
@@ -1564,7 +1601,18 @@ PlanResult PlanPath(Ur5Scene& scene,
   setup.setPlanner(planner);
   SetStartAndGoal(setup, space, home_q, goal_q);
   setup.setup();
-  return RunPlanPipeline(scene, setup, planner, planner_kind);
+  const double sampler_goal_bias =
+      planner_kind == PlannerKind::kExperienceRrtConnect ? 0.0 : kGoalSampleBias;
+  return RunPlanPipeline(scene,
+                         setup,
+                         planner,
+                         home_q,
+                         goal_q,
+                         planner_kind,
+                         preserve_planner_between_attempts,
+                         path_source,
+                         planning_budget_seconds,
+                         sampler_goal_bias);
 }
 
 PlanResult PlanFromReusablePath(Ur5Scene& scene,
@@ -1597,6 +1645,8 @@ PlanResult PlanFromReusablePath(Ur5Scene& scene,
   return FinalizeGeometricPath(scene,
                                setup,
                                raw_path,
+                               home_q,
+                               goal_q,
                                planner_kind,
                                "cached reusable path",
                                true,

@@ -2,20 +2,22 @@
 
 #include "ur5_clutter_core.hpp"
 
+#include <functional>
 #include <future>
 #include <limits>
 #include <mutex>
+#include <queue>
 #include <tuple>
 #include <unordered_map>
 
 namespace {
 
 constexpr int kMaxLoopPlanningAttempts = 5;
-constexpr double kInitialSpars2PlanningBudgetSeconds = 600.0;
-constexpr double kSubsequentSpars2PlanningBudgetSeconds = 1.0;
-constexpr double kSpars2GoalSampleBias = 0.02;
-constexpr double kSpars2BridgeSampleBias = 0.18;
-constexpr double kSpars2BridgeNoiseStdDev = 0.12;
+constexpr double kExperiencePlanningBudgetSeconds = 120.0;
+constexpr double kExperienceExpansionBudgetSeconds = kExperiencePlanningBudgetSeconds;
+constexpr unsigned int kExperienceConnectorCandidates = 96;
+constexpr unsigned int kExperienceRoadmapConnectorCandidates = 16;
+constexpr double kExperienceNodeMergeTolerance = 0.015;
 
 struct SharedPlanningStatus {
   std::mutex mutex;
@@ -62,215 +64,226 @@ struct CachedLoopPath {
 using LoopPathCache =
     std::unordered_map<LoopTransitionKey, CachedLoopPath, LoopTransitionKeyHash>;
 
-class MutableGoalBiasedStateSampler final : public ob::StateSampler {
+class RrtConnectExperienceLoopPlanner {
  public:
-  MutableGoalBiasedStateSampler(const ob::StateSpace* space,
-                                const JointArray* start_q,
-                                const JointArray* goal_q,
-                                double goal_bias,
-                                double bridge_bias,
-                                double bridge_noise_stddev)
-      : ob::StateSampler(space),
-        default_sampler_(space->allocDefaultStateSampler()),
-        start_q_(start_q),
-        goal_q_(goal_q),
-        goal_bias_(goal_bias),
-        bridge_bias_(bridge_bias),
-        bridge_noise_stddev_(bridge_noise_stddev) {}
-
-  void sampleUniform(ob::State* state) override {
-    const double draw = rng_.uniform01();
-    if (goal_q_ != nullptr && draw < goal_bias_) {
-      FillState(*goal_q_, state);
-      return;
-    }
-    if (start_q_ != nullptr && goal_q_ != nullptr && draw < goal_bias_ + bridge_bias_) {
-      JointArray q{};
-      const double alpha = rng_.uniform01();
-      for (int i = 0; i < kDof; ++i) {
-        q[i] = (*start_q_)[i] + alpha * ((*goal_q_)[i] - (*start_q_)[i]) +
-               rng_.gaussian(0.0, bridge_noise_stddev_);
-      }
-      FillState(q, state);
-      space_->enforceBounds(state);
-      return;
-    }
-    default_sampler_->sampleUniform(state);
-  }
-
-  void sampleUniformNear(ob::State* state, const ob::State* near, double distance) override {
-    default_sampler_->sampleUniformNear(state, near, distance);
-  }
-
-  void sampleGaussian(ob::State* state, const ob::State* mean, double std_dev) override {
-    default_sampler_->sampleGaussian(state, mean, std_dev);
-  }
-
- private:
-  ob::StateSamplerPtr default_sampler_;
-  const JointArray* start_q_ = nullptr;
-  const JointArray* goal_q_ = nullptr;
-  double goal_bias_ = 0.0;
-  double bridge_bias_ = 0.0;
-  double bridge_noise_stddev_ = 0.0;
-  ompl::RNG rng_;
-};
-
-class ReusableSpars2LoopPlanner {
- public:
-  explicit ReusableSpars2LoopPlanner(const std::filesystem::path& scene_path)
-      : scene_(scene_path),
+  explicit RrtConnectExperienceLoopPlanner(const std::filesystem::path& scene_path)
+      : scene_path_(scene_path),
+        scene_(scene_path),
         space_(MakePlanningStateSpace(scene_, JointArray{}, false)),
-        setup_(space_),
-        planner_(MakePlanner(setup_.getSpaceInformation(), PlannerKind::kSpars2)) {
-    space_->setStateSamplerAllocator([this](const ob::StateSpace* sampler_space) {
-      return std::make_shared<MutableGoalBiasedStateSampler>(
-          sampler_space,
-          &current_start_q_,
-          &current_goal_q_,
-          kSpars2GoalSampleBias,
-          kSpars2BridgeSampleBias,
-          kSpars2BridgeNoiseStdDev);
-    });
+        setup_(space_) {
     setup_.setStateValidityChecker([this](const ob::State* state) {
       return scene_.IsStateValid(StateToJoints(state));
     });
-    setup_.setPlanner(planner_);
+    setup_.setPlanner(MakePlanner(setup_.getSpaceInformation(), PlannerKind::kRrtConnect));
+    setup_.setup();
   }
 
   PlanResult Plan(const JointArray& start_q, const JointArray& goal_q) {
     using Clock = std::chrono::steady_clock;
-    const double planning_budget_seconds =
-        first_query_ ? kInitialSpars2PlanningBudgetSeconds
-                     : kSubsequentSpars2PlanningBudgetSeconds;
-    current_start_q_ = start_q;
-    current_goal_q_ = goal_q;
     SetStartAndGoal(setup_, space_, start_q, goal_q);
-    planner_->clearQuery();
-    setup_.setup();
     setup_.getProblemDefinition()->clearSolutionPaths();
 
     const auto start_time = Clock::now();
     const auto deadline =
         start_time + std::chrono::duration_cast<Clock::duration>(
-                         std::chrono::duration<double>(planning_budget_seconds));
-    const double solve_budget =
-        std::max(kMinOmplSolveAttemptSeconds,
-                 planning_budget_seconds - kMinimumSplineAttemptBudgetSeconds);
+                         std::chrono::duration<double>(kExperiencePlanningBudgetSeconds));
 
-    const auto solved = setup_.solve(solve_budget);
-    first_query_ = false;
-    if (solved == ob::PlannerStatus::EXACT_SOLUTION) {
+    if (std::optional<og::PathGeometric> graph_path = QueryExperienceGraph(start_q, goal_q)) {
       return FinalizeGeometricPath(scene_,
                                    setup_,
-                                   setup_.getSolutionPath(),
-                                   PlannerKind::kSpars2,
-                                   "SPARS2 reusable roadmap query",
+                                   *graph_path,
+                                   start_q,
+                                   goal_q,
+                                   PlannerKind::kExperienceRrtConnect,
+                                   "RRTConnect experience roadmap query",
                                    true,
-                                   1,
+                                   0,
                                    0,
                                    start_time,
                                    deadline,
-                                   kSpars2GoalSampleBias);
+                                   0.0);
     }
 
-    std::optional<og::PathGeometric> roadmap_path = QueryPlannerDataPath();
-    if (roadmap_path.has_value()) {
-      return FinalizeGeometricPath(scene_,
-                                   setup_,
-                                   *roadmap_path,
-                                   PlannerKind::kSpars2,
-                                   "SPARS2 planner-data roadmap query",
-                                   true,
-                                   1,
-                                   solved ? 1 : 0,
-                                   start_time,
-                                   deadline,
-                                   kSpars2GoalSampleBias);
-    }
-
-    throw std::runtime_error(
-        "SPARS2 did not connect the current query through its reusable roadmap");
+    Ur5Scene expansion_scene(scene_path_);
+    PlanResult expanded = PlanPath(expansion_scene,
+                                   start_q,
+                                   goal_q,
+                                   PlannerKind::kExperienceRrtConnect,
+                                   "RRTConnect experience expansion",
+                                   kExperienceExpansionBudgetSeconds,
+                                   true);
+    InsertExperiencePath(expanded.path);
+    return expanded;
   }
 
   unsigned int RoadmapStateCount() const {
-    const auto spars2 = std::dynamic_pointer_cast<const og::SPARStwo>(planner_);
-    return spars2 == nullptr ? 0U : spars2->milestoneCount();
+    return static_cast<unsigned int>(nodes_.size());
   }
 
   double NextPlanningBudgetSeconds() const {
-    return first_query_ ? kInitialSpars2PlanningBudgetSeconds
-                        : kSubsequentSpars2PlanningBudgetSeconds;
+    return kExperiencePlanningBudgetSeconds;
   }
 
  private:
-  std::optional<og::PathGeometric> QueryPlannerDataPath() {
-    ob::PlannerData data(setup_.getSpaceInformation());
-    planner_->getPlannerData(data);
-    const unsigned int vertex_count = data.numVertices();
-    if (vertex_count == 0 || data.numStartVertices() == 0 || data.numGoalVertices() == 0) {
-      return std::nullopt;
+  double JointDistance(const JointArray& a, const JointArray& b) const {
+    double sum = 0.0;
+    for (int i = 0; i < kDof; ++i) {
+      const double d = a[i] - b[i];
+      sum += d * d;
     }
+    return std::sqrt(sum);
+  }
 
-    const unsigned int start_index = data.getStartIndex(0);
-    const unsigned int goal_index = data.getGoalIndex(0);
-    if (start_index == ob::PlannerData::INVALID_INDEX ||
-        goal_index == ob::PlannerData::INVALID_INDEX) {
-      return std::nullopt;
-    }
+  bool MotionValid(const JointArray& from, const JointArray& to) const {
+    ob::ScopedState<> from_state(space_);
+    ob::ScopedState<> to_state(space_);
+    FillState(from, from_state);
+    FillState(to, to_state);
+    return setup_.getSpaceInformation()->checkMotion(from_state.get(), to_state.get());
+  }
 
-    const auto& space_information = setup_.getSpaceInformation();
-    std::vector<std::vector<std::pair<unsigned int, double>>> adjacency(vertex_count);
-    for (unsigned int v = 0; v < vertex_count; ++v) {
-      std::vector<unsigned int> edges;
-      data.getEdges(v, edges);
-      for (const unsigned int target : edges) {
-        const ob::State* from_state = data.getVertex(v).getState();
-        const ob::State* to_state = data.getVertex(target).getState();
-        if (from_state == nullptr || to_state == nullptr) {
-          continue;
-        }
-        adjacency[v].push_back({target, space_information->distance(from_state, to_state)});
+  std::size_t FindOrAddNode(const JointArray& q) {
+    for (std::size_t i = 0; i < nodes_.size(); ++i) {
+      if (MaxJointDelta(nodes_[i], q) <= kExperienceNodeMergeTolerance) {
+        return i;
       }
     }
+    nodes_.push_back(q);
+    adjacency_.emplace_back();
+    return nodes_.size() - 1;
+  }
 
-    AddTemporaryRoadmapConnectors(data, start_index, adjacency);
-    AddTemporaryRoadmapConnectors(data, goal_index, adjacency);
+  void AddExperienceEdge(std::size_t a, std::size_t b) {
+    if (a == b) {
+      return;
+    }
+    const double weight = JointDistance(nodes_[a], nodes_[b]);
+    auto add_one_way = [&](std::size_t from, std::size_t to) {
+      for (const auto& [existing, _] : adjacency_[from]) {
+        if (existing == to) {
+          return;
+        }
+      }
+      adjacency_[from].push_back({to, weight});
+    };
+    add_one_way(a, b);
+    add_one_way(b, a);
+  }
 
+  void AddRoadmapConnectors(std::size_t node_index) {
+    std::vector<std::pair<double, std::size_t>> candidates;
+    candidates.reserve(nodes_.size());
+    for (std::size_t i = 0; i < nodes_.size(); ++i) {
+      if (i == node_index) {
+        continue;
+      }
+      candidates.push_back({JointDistance(nodes_[node_index], nodes_[i]), i});
+    }
+    std::sort(candidates.begin(), candidates.end());
+
+    unsigned int connected = 0;
+    for (const auto& [_, target] : candidates) {
+      if (connected >= kExperienceRoadmapConnectorCandidates) {
+        break;
+      }
+      if (!MotionValid(nodes_[node_index], nodes_[target])) {
+        continue;
+      }
+      AddExperienceEdge(node_index, target);
+      ++connected;
+    }
+  }
+
+  void InsertExperiencePath(const std::vector<JointArray>& path) {
+    std::optional<std::size_t> previous;
+    for (const JointArray& q : path) {
+      const std::size_t current = FindOrAddNode(q);
+      if (previous.has_value()) {
+        AddExperienceEdge(*previous, current);
+      }
+      AddRoadmapConnectors(current);
+      previous = current;
+    }
+  }
+
+  void AddTemporaryConnectors(
+      const JointArray& query,
+      std::size_t query_index,
+      std::vector<std::vector<std::pair<std::size_t, double>>>& adjacency) const {
+    std::vector<std::pair<double, std::size_t>> candidates;
+    candidates.reserve(nodes_.size());
+    for (std::size_t i = 0; i < nodes_.size(); ++i) {
+      candidates.push_back({JointDistance(query, nodes_[i]), i});
+    }
+    std::sort(candidates.begin(), candidates.end());
+
+    unsigned int connected = 0;
+    for (const auto& [distance, target] : candidates) {
+      if (connected >= kExperienceConnectorCandidates) {
+        break;
+      }
+      if (!MotionValid(query, nodes_[target])) {
+        continue;
+      }
+      adjacency[query_index].push_back({target, distance});
+      adjacency[target].push_back({query_index, distance});
+      ++connected;
+    }
+  }
+
+  std::optional<og::PathGeometric> QueryExperienceGraph(const JointArray& start_q,
+                                                        const JointArray& goal_q) const {
+    if (nodes_.empty()) {
+      return std::nullopt;
+    }
+
+    const std::size_t start_index = nodes_.size();
+    const std::size_t goal_index = nodes_.size() + 1;
+    std::vector<std::vector<std::pair<std::size_t, double>>> adjacency = adjacency_;
+    adjacency.resize(nodes_.size() + 2);
+    AddTemporaryConnectors(start_q, start_index, adjacency);
+    AddTemporaryConnectors(goal_q, goal_index, adjacency);
+    if (MotionValid(start_q, goal_q)) {
+      const double direct_weight = JointDistance(start_q, goal_q);
+      adjacency[start_index].push_back({goal_index, direct_weight});
+      adjacency[goal_index].push_back({start_index, direct_weight});
+    }
+
+    const std::size_t vertex_count = adjacency.size();
+    const std::size_t invalid_index = std::numeric_limits<std::size_t>::max();
     std::vector<double> distance(vertex_count, std::numeric_limits<double>::infinity());
-    std::vector<unsigned int> previous(vertex_count, ob::PlannerData::INVALID_INDEX);
-    std::vector<bool> visited(vertex_count, false);
+    std::vector<std::size_t> previous(vertex_count, invalid_index);
+    using QueueItem = std::pair<double, std::size_t>;
+    std::priority_queue<QueueItem, std::vector<QueueItem>, std::greater<>> queue;
     distance[start_index] = 0.0;
+    queue.push({0.0, start_index});
 
-    for (unsigned int step = 0; step < vertex_count; ++step) {
-      unsigned int current = ob::PlannerData::INVALID_INDEX;
-      double best_distance = std::numeric_limits<double>::infinity();
-      for (unsigned int v = 0; v < vertex_count; ++v) {
-        if (!visited[v] && distance[v] < best_distance) {
-          current = v;
-          best_distance = distance[v];
-        }
+    while (!queue.empty()) {
+      const auto [current_distance, current] = queue.top();
+      queue.pop();
+      if (current_distance > distance[current]) {
+        continue;
       }
-      if (current == ob::PlannerData::INVALID_INDEX || current == goal_index) {
+      if (current == goal_index) {
         break;
       }
 
-      visited[current] = true;
       for (const auto& [target, edge_cost] : adjacency[current]) {
         const double candidate = distance[current] + edge_cost;
         if (candidate < distance[target]) {
           distance[target] = candidate;
           previous[target] = current;
+          queue.push({candidate, target});
         }
       }
     }
 
-    if (previous[goal_index] == ob::PlannerData::INVALID_INDEX) {
+    if (previous[goal_index] == invalid_index) {
       return std::nullopt;
     }
 
-    std::vector<unsigned int> path_indices;
-    for (unsigned int v = goal_index; v != ob::PlannerData::INVALID_INDEX; v = previous[v]) {
+    std::vector<std::size_t> path_indices;
+    for (std::size_t v = goal_index; v != invalid_index; v = previous[v]) {
       path_indices.push_back(v);
       if (v == start_index) {
         break;
@@ -281,58 +294,26 @@ class ReusableSpars2LoopPlanner {
     }
     std::reverse(path_indices.begin(), path_indices.end());
 
-    og::PathGeometric path(space_information);
-    for (const unsigned int index : path_indices) {
-      const ob::State* state = data.getVertex(index).getState();
-      if (state == nullptr) {
-        return std::nullopt;
+    std::vector<JointArray> joints;
+    joints.reserve(path_indices.size());
+    for (const std::size_t index : path_indices) {
+      if (index == start_index) {
+        joints.push_back(start_q);
+      } else if (index == goal_index) {
+        joints.push_back(goal_q);
+      } else {
+        joints.push_back(nodes_[index]);
       }
-      path.append(state);
     }
-    return path;
+    return JointsToPathGeometric(setup_.getSpaceInformation(), joints);
   }
 
-  void AddTemporaryRoadmapConnectors(
-      const ob::PlannerData& data,
-      unsigned int query_index,
-      std::vector<std::vector<std::pair<unsigned int, double>>>& adjacency) {
-    const auto& space_information = setup_.getSpaceInformation();
-    const ob::State* query_state = data.getVertex(query_index).getState();
-    if (query_state == nullptr) {
-      return;
-    }
-
-    std::vector<std::pair<double, unsigned int>> candidates;
-    candidates.reserve(data.numVertices());
-    for (unsigned int v = 0; v < data.numVertices(); ++v) {
-      if (v == query_index) {
-        continue;
-      }
-      const ob::State* state = data.getVertex(v).getState();
-      if (state == nullptr) {
-        continue;
-      }
-      candidates.push_back({space_information->distance(query_state, state), v});
-    }
-    std::sort(candidates.begin(), candidates.end());
-
-    for (const auto& [distance, target] : candidates) {
-      const ob::State* target_state = data.getVertex(target).getState();
-      if (target_state == nullptr || !space_information->checkMotion(query_state, target_state)) {
-        continue;
-      }
-      adjacency[query_index].push_back({target, distance});
-      adjacency[target].push_back({query_index, distance});
-    }
-  }
-
-  JointArray current_start_q_{};
-  JointArray current_goal_q_{};
-  bool first_query_ = true;
+  std::filesystem::path scene_path_;
   Ur5Scene scene_;
   ob::StateSpacePtr space_;
   og::SimpleSetup setup_;
-  ob::PlannerPtr planner_;
+  std::vector<JointArray> nodes_;
+  std::vector<std::vector<std::pair<std::size_t, double>>> adjacency_;
 };
 
 std::string FormatJointArray(const JointArray& q) {
@@ -417,35 +398,36 @@ LoopPlanningResult PlanWithRetries(const std::filesystem::path& scene_path,
                                    PlannerKind planner_kind,
                                    LoopPathCache* path_cache = nullptr,
                                    std::optional<LoopTransitionKey> cache_key = std::nullopt,
-                                   ReusableSpars2LoopPlanner* spars2_planner = nullptr) {
+                                   RrtConnectExperienceLoopPlanner* experience_planner = nullptr) {
   LoopPlanningResult result;
-  if (planner_kind == PlannerKind::kSpars2 && spars2_planner != nullptr) {
-    const double budget_seconds = spars2_planner->NextPlanningBudgetSeconds();
+  if (planner_kind == PlannerKind::kExperienceRrtConnect && experience_planner != nullptr) {
+    const double budget_seconds = experience_planner->NextPlanningBudgetSeconds();
     try {
       UpdatePlanningStatus(status,
                            1,
-                           "SPARS2 single query, " +
-                               std::to_string(static_cast<int>(budget_seconds)) + " s budget",
+                           "RRTConnect experience " +
+                               std::to_string(static_cast<int>(kExperienceExpansionBudgetSeconds)) +
+                               " s expansion if graph misses",
                            {},
                            1,
                            budget_seconds);
-      result.plan = spars2_planner->Plan(start_q, goal_q);
+      result.plan = experience_planner->Plan(start_q, goal_q);
       result.accepted_attempt = 1;
       result.max_attempts = 1;
       result.budget_seconds = budget_seconds;
-      result.roadmap_states = spars2_planner->RoadmapStateCount();
+      result.roadmap_states = experience_planner->RoadmapStateCount();
       result.used_cache = false;
-      UpdatePlanningStatus(status, 1, "SPARS2 query succeeded", {}, 1, budget_seconds);
+      UpdatePlanningStatus(status, 1, "RRTConnect experience query succeeded", {}, 1, budget_seconds);
       return result;
     } catch (const std::exception& e) {
       result.max_attempts = 1;
       result.budget_seconds = budget_seconds;
-      result.roadmap_states = spars2_planner->RoadmapStateCount();
-      result.error = "SPARS2 exhausted " +
+      result.roadmap_states = experience_planner->RoadmapStateCount();
+      result.error = "RRTConnect experience exhausted " +
                      std::to_string(static_cast<int>(budget_seconds)) +
                      " s without connecting this query; roadmap states=" +
                      std::to_string(result.roadmap_states) + "; " + e.what();
-      UpdatePlanningStatus(status, 1, "SPARS2 query failed", result.error, 1, budget_seconds);
+      UpdatePlanningStatus(status, 1, "RRTConnect experience query failed", result.error, 1, budget_seconds);
       return result;
     }
   }
@@ -791,9 +773,9 @@ int RunGoalLoopDemo(int argc, char** argv, PlannerKind planner_kind, std::string
       }
       if (check_cache) {
         LoopPathCache path_cache;
-        std::optional<ReusableSpars2LoopPlanner> spars2_planner;
-        if (planner_kind == PlannerKind::kSpars2) {
-          spars2_planner.emplace(scene_path);
+        std::optional<RrtConnectExperienceLoopPlanner> experience_planner;
+        if (planner_kind == PlannerKind::kExperienceRrtConnect) {
+          experience_planner.emplace(scene_path);
         }
         SharedPlanningStatus first_status;
         SharedPlanningStatus second_status;
@@ -806,7 +788,7 @@ int RunGoalLoopDemo(int argc, char** argv, PlannerKind planner_kind, std::string
                             planner_kind,
                             planner_kind == PlannerKind::kRrtConnect ? &path_cache : nullptr,
                             cache_key,
-                            spars2_planner ? &*spars2_planner : nullptr);
+                            experience_planner ? &*experience_planner : nullptr);
         LoopPlanningResult second;
         if (first.accepted_attempt != 0) {
           second = PlanWithRetries(scene_path,
@@ -816,13 +798,15 @@ int RunGoalLoopDemo(int argc, char** argv, PlannerKind planner_kind, std::string
                                    planner_kind,
                                    planner_kind == PlannerKind::kRrtConnect ? &path_cache : nullptr,
                                    cache_key,
-                                   spars2_planner ? &*spars2_planner : nullptr);
+                                   experience_planner ? &*experience_planner : nullptr);
         }
         std::cout << "cache smoke first_used_cache=" << std::boolalpha << first.used_cache
                   << " second_used_cache=" << second.used_cache
-                  << " cached_entries=" << path_cache.size();
-        if (spars2_planner) {
-          std::cout << " spars2_roadmap_states=" << spars2_planner->RoadmapStateCount();
+                  << " cached_entries=" << path_cache.size()
+                  << " first_source=\"" << first.plan.plan_source << "\""
+                  << " second_source=\"" << second.plan.plan_source << "\"";
+        if (experience_planner) {
+          std::cout << " experience_roadmap_states=" << experience_planner->RoadmapStateCount();
         }
         std::cout << '\n';
         if (planner_kind == PlannerKind::kRrtConnect &&
@@ -830,12 +814,15 @@ int RunGoalLoopDemo(int argc, char** argv, PlannerKind planner_kind, std::string
              !second.used_cache || path_cache.size() != 1)) {
           return 1;
         }
-        if (planner_kind == PlannerKind::kSpars2 &&
+        if (planner_kind == PlannerKind::kExperienceRrtConnect &&
             (first.accepted_attempt == 0 || second.accepted_attempt == 0 || first.used_cache ||
-             second.used_cache || path_cache.size() != 0 || spars2_planner->RoadmapStateCount() == 0)) {
+             second.used_cache || path_cache.size() != 0 ||
+             first.plan.plan_source != "RRTConnect experience expansion" ||
+             second.plan.plan_source != "RRTConnect experience roadmap query" ||
+             experience_planner->RoadmapStateCount() == 0)) {
           return 1;
         }
-        if (planner_kind != PlannerKind::kRrtConnect && planner_kind != PlannerKind::kSpars2 &&
+        if (planner_kind != PlannerKind::kRrtConnect && planner_kind != PlannerKind::kExperienceRrtConnect &&
             second.used_cache) {
           return 1;
         }
@@ -843,9 +830,9 @@ int RunGoalLoopDemo(int argc, char** argv, PlannerKind planner_kind, std::string
       if (check_transitions) {
         std::array<int, kWindowSpecs.size()> transition_window_hits{};
         LoopPathCache path_cache;
-        std::optional<ReusableSpars2LoopPlanner> spars2_planner;
-        if (planner_kind == PlannerKind::kSpars2) {
-          spars2_planner.emplace(scene_path);
+        std::optional<RrtConnectExperienceLoopPlanner> experience_planner;
+        if (planner_kind == PlannerKind::kExperienceRrtConnect) {
+          experience_planner.emplace(scene_path);
         }
         for (std::size_t i = 0; i < goals.size(); ++i) {
           const std::size_t next = (i + 1) % goals.size();
@@ -859,7 +846,7 @@ int RunGoalLoopDemo(int argc, char** argv, PlannerKind planner_kind, std::string
                               planner_kind,
                               planner_kind == PlannerKind::kRrtConnect ? &path_cache : nullptr,
                               cache_key,
-                              spars2_planner ? &*spars2_planner : nullptr);
+                              experience_planner ? &*experience_planner : nullptr);
           if (result.accepted_attempt == 0 || result.plan.path.empty()) {
             std::cerr << "transition " << i + 1 << " -> " << next + 1
                       << " failed: " << result.error << '\n';
@@ -872,6 +859,7 @@ int RunGoalLoopDemo(int argc, char** argv, PlannerKind planner_kind, std::string
           }
           std::cout << "transition " << i + 1 << " -> " << next + 1
                     << " planned path=\"" << result.plan.path_kind
+                    << "\" source=\"" << result.plan.plan_source
                     << "\" accepted_attempt=" << result.accepted_attempt
                     << " used_cache=" << std::boolalpha << result.used_cache
                     << " planning_wall_ms=" << result.plan.planning_wall_ms << '\n';
@@ -892,9 +880,9 @@ int RunGoalLoopDemo(int argc, char** argv, PlannerKind planner_kind, std::string
     LivePidViewer viewer(scene, {}, true);
     viewer.RenderStatus(std::string(demo_title) + "\nStarting at goal 1", "Esc: stop");
     LoopPathCache path_cache;
-    std::optional<ReusableSpars2LoopPlanner> spars2_planner;
-    if (planner_kind == PlannerKind::kSpars2) {
-      spars2_planner.emplace(scene_path);
+    std::optional<RrtConnectExperienceLoopPlanner> experience_planner;
+    if (planner_kind == PlannerKind::kExperienceRrtConnect) {
+      experience_planner.emplace(scene_path);
     }
 
     while (viewer.active()) {
@@ -912,7 +900,7 @@ int RunGoalLoopDemo(int argc, char** argv, PlannerKind planner_kind, std::string
             planner_kind,
             planner_kind == PlannerKind::kRrtConnect ? &path_cache : nullptr,
             cache_key,
-            spars2_planner ? &*spars2_planner : nullptr);
+            experience_planner ? &*experience_planner : nullptr);
       });
 
       while (future.wait_for(std::chrono::milliseconds(0)) != std::future_status::ready &&
@@ -937,8 +925,8 @@ int RunGoalLoopDemo(int argc, char** argv, PlannerKind planner_kind, std::string
         std::cerr << "last_error=" << planning.error << '\n';
         std::ostringstream left;
         left << demo_title << "\n";
-        if (planner_kind == PlannerKind::kSpars2) {
-          left << "SPARS2 budget exhausted\n"
+        if (planner_kind == PlannerKind::kExperienceRrtConnect) {
+          left << "RRTConnect experience budget exhausted\n"
                << "Segment " << current_index + 1 << " -> " << next_index + 1 << "\n"
                << "Budget: " << std::fixed << std::setprecision(0) << planning.budget_seconds
                << " s\n"

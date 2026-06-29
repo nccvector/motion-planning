@@ -4,4 +4,3 @@
 - Prefer small, inspectable C++ examples over large robotics frameworks.
 - Use MuJoCo for simulation/collision checks and OMPL for planning.
 - Keep third-party dependencies declared from CMake where practical.
-- Update `PROGRESS.md` whenever the project state changes.
