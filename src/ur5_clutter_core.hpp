@@ -3,11 +3,14 @@
 #include <GLFW/glfw3.h>
 #include <mujoco/mujoco.h>
 #include <ompl/base/ScopedState.h>
+#include <ompl/base/StateSampler.h>
 #include <ompl/base/spaces/RealVectorBounds.h>
 #include <ompl/base/spaces/RealVectorStateSpace.h>
 #include <ompl/geometric/PathGeometric.h>
 #include <ompl/geometric/SimpleSetup.h>
+#include <ompl/geometric/planners/rrt/InformedRRTstar.h>
 #include <ompl/geometric/planners/rrt/RRTConnect.h>
+#include <ompl/util/RandomNumbers.h>
 
 #include <algorithm>
 #include <array>
@@ -55,6 +58,7 @@ constexpr double kOmplObstacleClearance = 0.015;
 constexpr double kPlanningObstacleClearance = 0.015;
 constexpr std::size_t kInterpolatedPathStates = 480;
 constexpr double kPlanningTimeBudgetSeconds = 3.000;
+constexpr double kGoalSampleBias = 0.25;
 constexpr double kMaxOmplSolveAttemptSeconds = 0.180;
 constexpr double kMinOmplSolveAttemptSeconds = 0.020;
 constexpr int kMaxC2RepairIterations = 8;
@@ -122,6 +126,21 @@ struct PlanResult {
   std::size_t simplified_state_count = 0;
   double planning_wall_ms = 0.0;
 };
+
+enum class PlannerKind {
+  kRrtConnect,
+  kInformedRrtStar,
+};
+
+std::string_view PlannerName(PlannerKind planner_kind) {
+  switch (planner_kind) {
+    case PlannerKind::kRrtConnect:
+      return "RRTConnect";
+    case PlannerKind::kInformedRrtStar:
+      return "InformedRRTstar";
+  }
+  return "unknown";
+}
 
 struct RobotNames {
   const char* label;
@@ -682,6 +701,44 @@ void FillState(const JointArray& q, ob::ScopedState<>& state) {
   }
 }
 
+void FillState(const JointArray& q, ob::State* state) {
+  auto* values = state->as<ob::RealVectorStateSpace::StateType>()->values;
+  for (int i = 0; i < kDof; ++i) {
+    values[i] = q[i];
+  }
+}
+
+class GoalBiasedStateSampler final : public ob::StateSampler {
+ public:
+  GoalBiasedStateSampler(const ob::StateSpace* space, JointArray goal_q, double goal_bias)
+      : ob::StateSampler(space),
+        default_sampler_(space->allocDefaultStateSampler()),
+        goal_q_(goal_q),
+        goal_bias_(goal_bias) {}
+
+  void sampleUniform(ob::State* state) override {
+    if (rng_.uniform01() < goal_bias_) {
+      FillState(goal_q_, state);
+      return;
+    }
+    default_sampler_->sampleUniform(state);
+  }
+
+  void sampleUniformNear(ob::State* state, const ob::State* near, double distance) override {
+    default_sampler_->sampleUniformNear(state, near, distance);
+  }
+
+  void sampleGaussian(ob::State* state, const ob::State* mean, double std_dev) override {
+    default_sampler_->sampleGaussian(state, mean, std_dev);
+  }
+
+ private:
+  ob::StateSamplerPtr default_sampler_;
+  JointArray goal_q_;
+  double goal_bias_ = 0.0;
+  ompl::RNG rng_;
+};
+
 double MaxAbsJointError(const JointArray& a, const JointArray& b) {
   double error = 0.0;
   for (int i = 0; i < kDof; ++i) {
@@ -1183,17 +1240,8 @@ JointArray SelectGoal(Ur5Scene& scene) {
   throw std::runtime_error("No collision-free shelf-side goal candidate found");
 }
 
-PlanResult PlanPath(Ur5Scene& scene,
-                    const JointArray& home_q,
-                    const JointArray& goal_q) {
-  using Clock = std::chrono::steady_clock;
-  const auto start_time = Clock::now();
-  const auto deadline =
-      start_time + std::chrono::duration<double>(kPlanningTimeBudgetSeconds);
-  auto remaining_seconds = [&]() {
-    return std::chrono::duration<double>(deadline - Clock::now()).count();
-  };
-
+std::shared_ptr<ob::RealVectorStateSpace> MakePlanningStateSpace(Ur5Scene& scene,
+                                                                 const JointArray& goal_q) {
   auto space = std::make_shared<ob::RealVectorStateSpace>(kDof);
   ob::RealVectorBounds bounds(kDof);
   for (int i = 0; i < kDof; ++i) {
@@ -1203,22 +1251,51 @@ PlanResult PlanPath(Ur5Scene& scene,
   }
   space->setBounds(bounds);
   space->setLongestValidSegmentFraction(0.004);
-
-  og::SimpleSetup setup(space);
-  setup.setStateValidityChecker([&scene](const ob::State* state) {
-    return scene.IsStateValid(StateToJoints(state));
+  space->setStateSamplerAllocator([goal_q](const ob::StateSpace* sampler_space) {
+    return std::make_shared<GoalBiasedStateSampler>(sampler_space, goal_q, kGoalSampleBias);
   });
+  return space;
+}
 
-  auto planner = std::make_shared<og::RRTConnect>(setup.getSpaceInformation());
-  planner->setRange(0.35);
-  setup.setPlanner(planner);
+ob::PlannerPtr MakePlanner(const ob::SpaceInformationPtr& space_information,
+                           PlannerKind planner_kind) {
+  if (planner_kind == PlannerKind::kInformedRrtStar) {
+    auto rrt_star = std::make_shared<og::InformedRRTstar>(space_information);
+    rrt_star->setRange(0.35);
+    rrt_star->setGoalBias(kGoalSampleBias);
+    rrt_star->setDelayCC(true);
+    return rrt_star;
+  }
 
+  auto rrt_connect = std::make_shared<og::RRTConnect>(space_information);
+  rrt_connect->setRange(0.35);
+  return rrt_connect;
+}
+
+void SetStartAndGoal(og::SimpleSetup& setup,
+                     const ob::StateSpacePtr& space,
+                     const JointArray& home_q,
+                     const JointArray& goal_q) {
   ob::ScopedState<> start(space);
   ob::ScopedState<> goal(space);
   FillState(home_q, start);
   FillState(goal_q, goal);
   setup.setStartAndGoalStates(start, goal, 0.04);
-  setup.setup();
+}
+
+PlanResult RunPlanPipeline(Ur5Scene& scene,
+                           og::SimpleSetup& setup,
+                           const ob::PlannerPtr& planner,
+                           PlannerKind planner_kind) {
+  using Clock = std::chrono::steady_clock;
+  const auto start_time = Clock::now();
+  const auto deadline =
+      start_time + std::chrono::duration<double>(kPlanningTimeBudgetSeconds);
+  auto remaining_seconds = [&]() {
+    return std::chrono::duration<double>(deadline - Clock::now()).count();
+  };
+
+  setup.getProblemDefinition()->clearSolutionPaths();
 
   bool exact_solution = false;
   int solve_attempts = 0;
@@ -1340,6 +1417,8 @@ PlanResult PlanPath(Ur5Scene& scene,
   const double elapsed_ms =
       std::chrono::duration<double, std::milli>(Clock::now() - start_time).count();
 
+  std::cout << "OMPL planner: " << PlannerName(planner_kind) << '\n';
+  std::cout << "OMPL goal sample bias: " << kGoalSampleBias << '\n';
   std::cout << "OMPL raw path states: " << raw_state_count << '\n';
   std::cout << "OMPL exact solution: " << std::boolalpha << exact_solution << '\n';
   std::cout << "OMPL solve attempts: " << solve_attempts << '\n';
@@ -1394,6 +1473,22 @@ PlanResult PlanPath(Ur5Scene& scene,
   result.simplified_state_count = simplified_state_count;
   result.planning_wall_ms = elapsed_ms;
   return result;
+}
+
+PlanResult PlanPath(Ur5Scene& scene,
+                    const JointArray& home_q,
+                    const JointArray& goal_q,
+                    PlannerKind planner_kind = PlannerKind::kRrtConnect) {
+  auto space = MakePlanningStateSpace(scene, goal_q);
+  og::SimpleSetup setup(space);
+  setup.setStateValidityChecker([&scene](const ob::State* state) {
+    return scene.IsStateValid(StateToJoints(state));
+  });
+  const ob::PlannerPtr planner = MakePlanner(setup.getSpaceInformation(), planner_kind);
+  setup.setPlanner(planner);
+  SetStartAndGoal(setup, space, home_q, goal_q);
+  setup.setup();
+  return RunPlanPipeline(scene, setup, planner, planner_kind);
 }
 
 void ValidatePlannedPath(Ur5Scene& scene, const std::vector<JointArray>& path) {

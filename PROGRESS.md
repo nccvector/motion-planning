@@ -1,5 +1,29 @@
 # Progress
 
+## 2026-06-29
+
+- Added a second endless goal loop executable for `InformedRRTstar`:
+  `ur5_goal_loop_informed_rrtstar_demo`.
+- Refactored the endless goal loop implementation into
+  `src/ur5_goal_loop_demo.hpp`, leaving `ur5_goal_loop_demo.cpp` and
+  `ur5_goal_loop_informed_rrtstar_demo.cpp` as small planner-specific entry
+  points.
+- Added `PlannerKind` selection to `PlanPath`, keeping `RRTConnect` as the
+  default for existing callers and using `InformedRRTstar` with the same range,
+  `0.05` goal bias, and delayed collision checking for the new loop demo.
+- Added a shared `0.25` exact-goal state-sampling bias in `PlanPath` so both
+  loop demos nudge OMPL samples toward the active segment goal; the
+  `InformedRRTstar` demo also uses OMPL's native `setGoalBias(0.25)`.
+- Reverted the OMPL planner/tree reuse experiment after it caused segfaults;
+  loop planning is back to fresh per-call planner construction and
+  `planner->clear()` between solve slices.
+- Verified:
+  - `cmake --build projects/ur5-mujoco-ompl/build --target ur5_goal_loop_demo -j`
+  - `cmake --build projects/ur5-mujoco-ompl/build --target ur5_goal_loop_informed_rrtstar_demo -j`
+  - `cmake --build projects/ur5-mujoco-ompl/build --target ur5_goal_loop_demo ur5_goal_loop_informed_rrtstar_demo -j`
+  - `./projects/ur5-mujoco-ompl/build/ur5_goal_loop_demo --check-goals`
+  - `./projects/ur5-mujoco-ompl/build/ur5_goal_loop_informed_rrtstar_demo --check-goals`
+
 ## 2026-06-27
 
 - Created local `ur5-mujoco-ompl` project scaffold outside the ROS Docker workspace.

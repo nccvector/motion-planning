@@ -127,21 +127,30 @@ target_compile_definitions(ur5_clutter_plan
     UR5_MUJOCO_OMPL_DEFAULT_SCENE="${CMAKE_CURRENT_BINARY_DIR}/scenes/ur5e_clutter.xml"
 )
 
-add_executable(ur5_goal_loop_demo
-  src/ur5_goal_loop_demo.cpp
-  src/ur5_clutter_core.hpp
-  src/ur5_visualization.hpp
-)
-target_compile_features(ur5_goal_loop_demo PRIVATE cxx_std_23)
-target_link_libraries(ur5_goal_loop_demo
-  PRIVATE
-    ${UR5_MUJOCO_TARGET}
-    ${UR5_OMPL_TARGET}
-    glfw
-)
-target_compile_definitions(ur5_goal_loop_demo
-  PRIVATE
-    UR5_MUJOCO_OMPL_DEFAULT_SCENE="${CMAKE_CURRENT_BINARY_DIR}/scenes/ur5e_clutter.xml"
+function(add_ur5_goal_loop_demo target source)
+  add_executable(${target}
+    ${source}
+    src/ur5_goal_loop_demo.hpp
+    src/ur5_clutter_core.hpp
+    src/ur5_visualization.hpp
+  )
+  target_compile_features(${target} PRIVATE cxx_std_23)
+  target_link_libraries(${target}
+    PRIVATE
+      ${UR5_MUJOCO_TARGET}
+      ${UR5_OMPL_TARGET}
+      glfw
+  )
+  target_compile_definitions(${target}
+    PRIVATE
+      UR5_MUJOCO_OMPL_DEFAULT_SCENE="${CMAKE_CURRENT_BINARY_DIR}/scenes/ur5e_clutter.xml"
+  )
+endfunction()
+
+add_ur5_goal_loop_demo(ur5_goal_loop_demo src/ur5_goal_loop_demo.cpp)
+add_ur5_goal_loop_demo(
+  ur5_goal_loop_informed_rrtstar_demo
+  src/ur5_goal_loop_informed_rrtstar_demo.cpp
 )
 
 add_executable(ur5_goal_monte_carlo
@@ -192,12 +201,15 @@ target_compile_definitions(ur5_path_diagnose
 if(MSVC)
   target_compile_options(ur5_clutter_plan PRIVATE /W4)
   target_compile_options(ur5_goal_loop_demo PRIVATE /W4)
+  target_compile_options(ur5_goal_loop_informed_rrtstar_demo PRIVATE /W4)
   target_compile_options(ur5_goal_monte_carlo PRIVATE /W4)
   target_compile_options(ur5_path_replay PRIVATE /W4)
   target_compile_options(ur5_path_diagnose PRIVATE /W4)
 else()
   target_compile_options(ur5_clutter_plan PRIVATE -Wall -Wextra -Wpedantic)
   target_compile_options(ur5_goal_loop_demo PRIVATE -Wall -Wextra -Wpedantic -Wno-unused-function)
+  target_compile_options(ur5_goal_loop_informed_rrtstar_demo PRIVATE
+    -Wall -Wextra -Wpedantic -Wno-unused-function)
   target_compile_options(ur5_goal_monte_carlo PRIVATE -Wall -Wextra -Wpedantic -Wno-unused-function)
   target_compile_options(ur5_path_replay PRIVATE -Wall -Wextra -Wpedantic)
   target_compile_options(ur5_path_diagnose PRIVATE -Wall -Wextra -Wpedantic)
