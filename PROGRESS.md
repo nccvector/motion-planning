@@ -519,6 +519,25 @@
     ur5_clutter_plan`, `./build/ur5_goal_loop_demo --check-goals`, and
     `./build/ur5_clutter_plan --no-live`, which reported
     `Planning time budget: 3.000 s`.
+- Added RRTConnect loop path reuse without keeping old planner trees alive:
+  - fresh RRTConnect loop plans now store reusable geometric path knots per
+    loop transition key,
+  - revisiting the same transition rehydrates the cached path into an OMPL
+    `PathGeometric`, validates/repairs it, then spends the normal postprocess
+    budget on `reduceVertices`, `ropeShortcutPath`, `partialShortcutPath`,
+    clearance checks, and the existing C2/fallback pipeline,
+  - cached paths are discarded and replanned if they fail validation,
+  - the live overlay now reports whether a segment came from a fresh solve or a
+    cached path,
+  - added `--check-cache` to smoke-test a fresh RRTConnect transition followed
+    by an immediate cached reuse of the same transition,
+  - kept Informed RRT* on the existing fresh-solve behavior.
+- Verified the cached-path change with:
+  - `cmake --build build --target ur5_goal_loop_demo
+    ur5_goal_loop_informed_rrtstar_demo -j`,
+  - `./build/ur5_goal_loop_demo --check-cache`, which reported
+    `first_used_cache=false`, `second_used_cache=true`, and one cached entry,
+  - `./build/ur5_goal_loop_informed_rrtstar_demo --check-goals`.
 
 ## Next
 

@@ -6,6 +6,7 @@
 #include <limits>
 #include <mutex>
 #include <tuple>
+#include <unordered_map>
 
 namespace {
 
@@ -21,8 +22,33 @@ struct SharedPlanningStatus {
 struct LoopPlanningResult {
   PlanResult plan;
   int accepted_attempt = 0;
+  bool used_cache = false;
   std::string error;
 };
+
+struct LoopTransitionKey {
+  std::size_t from_index = 0;
+  std::size_t to_index = 0;
+
+  bool operator==(const LoopTransitionKey& other) const {
+    return from_index == other.from_index && to_index == other.to_index;
+  }
+};
+
+struct LoopTransitionKeyHash {
+  std::size_t operator()(const LoopTransitionKey& key) const {
+    return key.from_index ^ (key.to_index + 0x9e3779b97f4a7c15ULL + (key.from_index << 6) +
+                             (key.from_index >> 2));
+  }
+};
+
+struct CachedLoopPath {
+  std::vector<JointArray> reusable_path_knots;
+  int reuse_count = 0;
+};
+
+using LoopPathCache =
+    std::unordered_map<LoopTransitionKey, CachedLoopPath, LoopTransitionKeyHash>;
 
 std::string FormatJointArray(const JointArray& q) {
   std::ostringstream out;
@@ -95,8 +121,35 @@ LoopPlanningResult PlanWithRetries(const std::filesystem::path& scene_path,
                                    const JointArray& start_q,
                                    const JointArray& goal_q,
                                    SharedPlanningStatus& status,
-                                   PlannerKind planner_kind) {
+                                   PlannerKind planner_kind,
+                                   LoopPathCache* path_cache = nullptr,
+                                   std::optional<LoopTransitionKey> cache_key = std::nullopt) {
   LoopPlanningResult result;
+  if (planner_kind == PlannerKind::kRrtConnect && path_cache != nullptr && cache_key.has_value()) {
+    const auto cached = path_cache->find(*cache_key);
+    if (cached != path_cache->end() && !cached->second.reusable_path_knots.empty()) {
+      try {
+        UpdatePlanningStatus(status,
+                             0,
+                             "Improving cached path, reuse " +
+                                 std::to_string(cached->second.reuse_count + 1));
+        Ur5Scene planning_scene(scene_path);
+        result.plan = PlanFromReusablePath(
+            planning_scene, start_q, goal_q, cached->second.reusable_path_knots, planner_kind);
+        result.accepted_attempt = 1;
+        result.used_cache = true;
+        cached->second.reusable_path_knots = result.plan.reusable_path_knots;
+        ++cached->second.reuse_count;
+        UpdatePlanningStatus(status, 0, "Cached path improved");
+        return result;
+      } catch (const std::exception& e) {
+        result.error = e.what();
+        path_cache->erase(cached);
+        UpdatePlanningStatus(status, 0, "Cached path rejected, replanning", result.error);
+      }
+    }
+  }
+
   for (int attempt = 1; attempt <= kMaxLoopPlanningAttempts; ++attempt) {
     try {
       UpdatePlanningStatus(status,
@@ -106,6 +159,11 @@ LoopPlanningResult PlanWithRetries(const std::filesystem::path& scene_path,
       Ur5Scene planning_scene(scene_path);
       result.plan = PlanPath(planning_scene, start_q, goal_q, planner_kind);
       result.accepted_attempt = attempt;
+      result.used_cache = false;
+      if (planner_kind == PlannerKind::kRrtConnect && path_cache != nullptr &&
+          cache_key.has_value() && !result.plan.reusable_path_knots.empty()) {
+        (*path_cache)[*cache_key] = CachedLoopPath{result.plan.reusable_path_knots, 0};
+      }
       UpdatePlanningStatus(status, attempt, "Planning succeeded");
       return result;
     } catch (const std::exception& e) {
@@ -196,6 +254,7 @@ void RenderExecutionStatus(LivePidViewer& viewer,
        << "Path: " << plan.path_kind << "\n"
        << "Spline fit: " << (plan.used_c2_spline ? "success" : "failed; using linear fallback")
        << "\n"
+       << "Plan source: " << (plan.solve_attempts == 0 ? "cached path" : "fresh solve") << "\n"
        << "Accepted attempt: " << accepted_attempt << "/" << kMaxLoopPlanningAttempts << "\n"
        << "Planning time: " << std::setprecision(1) << plan.planning_wall_ms << " ms\n"
        << "OMPL solve attempts: " << plan.solve_attempts << "\n"
@@ -222,6 +281,7 @@ void RenderPlanAcceptedStatus(LivePidViewer& viewer,
          << "Using fallback: " << plan.path_kind << "\n";
   }
   left << "Segment " << from_index + 1 << " -> " << to_index + 1 << "\n"
+       << "Plan source: " << (plan.solve_attempts == 0 ? "cached path" : "fresh solve") << "\n"
        << "Accepted attempt: " << accepted_attempt << "/" << kMaxLoopPlanningAttempts << "\n"
        << "Planning time: " << std::fixed << std::setprecision(1) << plan.planning_wall_ms << " ms";
 
@@ -318,6 +378,7 @@ int RunGoalLoopDemo(int argc, char** argv, PlannerKind planner_kind, std::string
   bool live_realtime = true;
   bool check_goals = false;
   bool check_transitions = false;
+  bool check_cache = false;
   std::optional<std::filesystem::path> scene_arg;
   for (int i = 1; i < argc; ++i) {
     const std::string_view arg(argv[i]);
@@ -330,9 +391,12 @@ int RunGoalLoopDemo(int argc, char** argv, PlannerKind planner_kind, std::string
     } else if (arg == "--check-transitions") {
       check_goals = true;
       check_transitions = true;
+    } else if (arg == "--check-cache") {
+      check_goals = true;
+      check_cache = true;
     } else if (arg == "--help" || arg == "-h") {
       std::cout << "Usage: " << argv[0]
-                << " [--live-fast|--live-realtime|--check-goals|--check-transitions]"
+                << " [--live-fast|--live-realtime|--check-goals|--check-transitions|--check-cache]"
                    " [scene.xml]\n";
       return 0;
     } else if (!scene_arg.has_value()) {
@@ -397,13 +461,36 @@ int RunGoalLoopDemo(int argc, char** argv, PlannerKind planner_kind, std::string
           !shelf_windows_balanced || !alternating_sides || !all_goals_valid) {
         return 1;
       }
+      if (check_cache) {
+        LoopPathCache path_cache;
+        SharedPlanningStatus first_status;
+        SharedPlanningStatus second_status;
+        const LoopTransitionKey cache_key{0, 1};
+        const LoopPlanningResult first = PlanWithRetries(
+            scene_path, goals[0], goals[1], first_status, planner_kind, &path_cache, cache_key);
+        const LoopPlanningResult second = PlanWithRetries(
+            scene_path, goals[0], goals[1], second_status, planner_kind, &path_cache, cache_key);
+        std::cout << "cache smoke first_used_cache=" << std::boolalpha << first.used_cache
+                  << " second_used_cache=" << second.used_cache
+                  << " cached_entries=" << path_cache.size() << '\n';
+        if (planner_kind == PlannerKind::kRrtConnect &&
+            (first.accepted_attempt == 0 || second.accepted_attempt == 0 || first.used_cache ||
+             !second.used_cache || path_cache.size() != 1)) {
+          return 1;
+        }
+        if (planner_kind != PlannerKind::kRrtConnect && second.used_cache) {
+          return 1;
+        }
+      }
       if (check_transitions) {
         std::array<int, kWindowSpecs.size()> transition_window_hits{};
+        LoopPathCache path_cache;
         for (std::size_t i = 0; i < goals.size(); ++i) {
           const std::size_t next = (i + 1) % goals.size();
           SharedPlanningStatus status;
-          const LoopPlanningResult result =
-              PlanWithRetries(scene_path, goals[i], goals[next], status, planner_kind);
+          const LoopTransitionKey cache_key{i, next};
+          const LoopPlanningResult result = PlanWithRetries(
+              scene_path, goals[i], goals[next], status, planner_kind, &path_cache, cache_key);
           if (result.accepted_attempt == 0 || result.plan.path.empty()) {
             std::cerr << "transition " << i + 1 << " -> " << next + 1
                       << " failed: " << result.error << '\n';
@@ -417,6 +504,7 @@ int RunGoalLoopDemo(int argc, char** argv, PlannerKind planner_kind, std::string
           std::cout << "transition " << i + 1 << " -> " << next + 1
                     << " planned path=\"" << result.plan.path_kind
                     << "\" accepted_attempt=" << result.accepted_attempt
+                    << " used_cache=" << std::boolalpha << result.used_cache
                     << " planning_wall_ms=" << result.plan.planning_wall_ms << '\n';
         }
         for (std::size_t window = 0; window < kWindowSpecs.size(); ++window) {
@@ -434,6 +522,7 @@ int RunGoalLoopDemo(int argc, char** argv, PlannerKind planner_kind, std::string
     scene.ResetTo(goals[current_index]);
     LivePidViewer viewer(scene, {}, true);
     viewer.RenderStatus(std::string(demo_title) + "\nStarting at goal 1", "Esc: stop");
+    LoopPathCache path_cache;
 
     while (viewer.active()) {
       const std::size_t next_index = (current_index + 1) % goals.size();
@@ -441,8 +530,15 @@ int RunGoalLoopDemo(int argc, char** argv, PlannerKind planner_kind, std::string
       SharedPlanningStatus status;
       const auto planning_start = std::chrono::steady_clock::now();
       auto future = std::async(std::launch::async, [&]() {
+        const LoopTransitionKey cache_key{current_index, next_index};
         return PlanWithRetries(
-            scene_path, goals[current_index], goals[next_index], status, planner_kind);
+            scene_path,
+            goals[current_index],
+            goals[next_index],
+            status,
+            planner_kind,
+            &path_cache,
+            cache_key);
       });
 
       while (future.wait_for(std::chrono::milliseconds(0)) != std::future_status::ready &&

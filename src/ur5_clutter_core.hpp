@@ -117,6 +117,7 @@ struct C2AttemptResult {
 
 struct PlanResult {
   std::vector<JointArray> path;
+  std::vector<JointArray> reusable_path_knots;
   bool used_c2_spline = false;
   std::string path_kind = "unknown";
   int solve_attempts = 0;
@@ -804,6 +805,20 @@ std::vector<JointArray> PathStatesToJoints(const og::PathGeometric& path) {
   return result;
 }
 
+og::PathGeometric JointsToPathGeometric(const ob::SpaceInformationPtr& space_information,
+                                        const std::vector<JointArray>& knots) {
+  if (knots.size() < 2) {
+    throw std::runtime_error("Cannot build an OMPL path from fewer than two joint knots");
+  }
+  og::PathGeometric path(space_information);
+  for (const JointArray& q : knots) {
+    ob::ScopedState<> state(space_information->getStateSpace());
+    FillState(q, state);
+    path.append(state.get());
+  }
+  return path;
+}
+
 std::vector<double> ChordLengthParameters(const std::vector<JointArray>& knots) {
   std::vector<double> parameters(knots.size(), 0.0);
   for (std::size_t i = 1; i < knots.size(); ++i) {
@@ -1283,54 +1298,28 @@ void SetStartAndGoal(og::SimpleSetup& setup,
   setup.setStartAndGoalStates(start, goal, 0.04);
 }
 
-PlanResult RunPlanPipeline(Ur5Scene& scene,
-                           og::SimpleSetup& setup,
-                           const ob::PlannerPtr& planner,
-                           PlannerKind planner_kind) {
+PlanResult FinalizeGeometricPath(Ur5Scene& scene,
+                                 og::SimpleSetup& setup,
+                                 const og::PathGeometric& raw_path,
+                                 PlannerKind planner_kind,
+                                 std::string_view path_source,
+                                 bool exact_solution,
+                                 int solve_attempts,
+                                 int approximate_attempts,
+                                 std::chrono::steady_clock::time_point start_time,
+                                 std::chrono::steady_clock::time_point deadline) {
   using Clock = std::chrono::steady_clock;
-  const auto start_time = Clock::now();
-  const auto deadline =
-      start_time + std::chrono::duration<double>(kPlanningTimeBudgetSeconds);
   auto remaining_seconds = [&]() {
     return std::chrono::duration<double>(deadline - Clock::now()).count();
   };
 
-  setup.getProblemDefinition()->clearSolutionPaths();
-
-  bool exact_solution = false;
-  int solve_attempts = 0;
-  int approximate_attempts = 0;
-  while (remaining_seconds() > kMinimumSplineAttemptBudgetSeconds) {
-    const double usable_time = remaining_seconds() - kMinimumSplineAttemptBudgetSeconds;
-    if (usable_time < kMinOmplSolveAttemptSeconds) {
-      break;
-    }
-    const double solve_budget =
-        std::min(kMaxOmplSolveAttemptSeconds, std::max(kMinOmplSolveAttemptSeconds, usable_time));
-    if (solve_attempts > 0) {
-      setup.getProblemDefinition()->clearSolutionPaths();
-      planner->clear();
-    }
-    ++solve_attempts;
-    const auto solved = setup.solve(solve_budget);
-    if (solved == ob::PlannerStatus::EXACT_SOLUTION) {
-      exact_solution = true;
-      break;
-    }
-    if (solved) {
-      ++approximate_attempts;
-    }
-  }
-  if (!exact_solution) {
-    throw std::runtime_error(
-        "OMPL only found approximate paths inside the 3000 ms budget; refusing partial fallback");
-  }
-
-  const std::size_t raw_state_count = setup.getSolutionPath().getStateCount();
-  og::PathGeometric raw_path = setup.getSolutionPath();
+  const std::size_t raw_state_count = raw_path.getStateCount();
   og::PathGeometric path(raw_path);
 
   setup.getPathSimplifier()->reduceVertices(path);
+  if (remaining_seconds() > 0.12) {
+    setup.getPathSimplifier()->ropeShortcutPath(path, 0.20, 0.10);
+  }
   if (remaining_seconds() > 0.05) {
     setup.getPathSimplifier()->partialShortcutPath(path, 80, 24, 1.0);
   }
@@ -1350,6 +1339,7 @@ PlanResult RunPlanPipeline(Ur5Scene& scene,
   const bool shortcut_passes_ring = PathPassesRingOpening(scene, shortcut_linear);
   const bool raw_passes_ring = PathPassesRingOpening(scene, raw_linear);
   std::vector<JointArray> spline_knots = shortcut_passes_ring ? shortcut_knots : raw_knots;
+  std::vector<JointArray> reusable_path_knots = spline_knots;
   C2AttemptResult best_attempt;
   bool using_c2 = false;
   std::string fallback_source = "none";
@@ -1418,6 +1408,7 @@ PlanResult RunPlanPipeline(Ur5Scene& scene,
       std::chrono::duration<double, std::milli>(Clock::now() - start_time).count();
 
   std::cout << "OMPL planner: " << PlannerName(planner_kind) << '\n';
+  std::cout << "OMPL path source: " << path_source << '\n';
   std::cout << "OMPL goal sample bias: " << kGoalSampleBias << '\n';
   std::cout << "OMPL raw path states: " << raw_state_count << '\n';
   std::cout << "OMPL exact solution: " << std::boolalpha << exact_solution << '\n';
@@ -1464,6 +1455,7 @@ PlanResult RunPlanPipeline(Ur5Scene& scene,
 
   PlanResult result;
   result.path = std::move(planned_path);
+  result.reusable_path_knots = std::move(reusable_path_knots);
   result.used_c2_spline = using_c2;
   result.path_kind = using_c2 ? "C2 spline smoothed path" : fallback_source;
   result.solve_attempts = solve_attempts;
@@ -1473,6 +1465,62 @@ PlanResult RunPlanPipeline(Ur5Scene& scene,
   result.simplified_state_count = simplified_state_count;
   result.planning_wall_ms = elapsed_ms;
   return result;
+}
+
+PlanResult RunPlanPipeline(Ur5Scene& scene,
+                           og::SimpleSetup& setup,
+                           const ob::PlannerPtr& planner,
+                           PlannerKind planner_kind) {
+  using Clock = std::chrono::steady_clock;
+  const auto start_time = Clock::now();
+  const auto deadline =
+      start_time + std::chrono::duration_cast<Clock::duration>(
+                       std::chrono::duration<double>(kPlanningTimeBudgetSeconds));
+  auto remaining_seconds = [&]() {
+    return std::chrono::duration<double>(deadline - Clock::now()).count();
+  };
+
+  setup.getProblemDefinition()->clearSolutionPaths();
+
+  bool exact_solution = false;
+  int solve_attempts = 0;
+  int approximate_attempts = 0;
+  while (remaining_seconds() > kMinimumSplineAttemptBudgetSeconds) {
+    const double usable_time = remaining_seconds() - kMinimumSplineAttemptBudgetSeconds;
+    if (usable_time < kMinOmplSolveAttemptSeconds) {
+      break;
+    }
+    const double solve_budget =
+        std::min(kMaxOmplSolveAttemptSeconds, std::max(kMinOmplSolveAttemptSeconds, usable_time));
+    if (solve_attempts > 0) {
+      setup.getProblemDefinition()->clearSolutionPaths();
+      planner->clear();
+    }
+    ++solve_attempts;
+    const auto solved = setup.solve(solve_budget);
+    if (solved == ob::PlannerStatus::EXACT_SOLUTION) {
+      exact_solution = true;
+      break;
+    }
+    if (solved) {
+      ++approximate_attempts;
+    }
+  }
+  if (!exact_solution) {
+    throw std::runtime_error(
+        "OMPL only found approximate paths inside the 3000 ms budget; refusing partial fallback");
+  }
+
+  return FinalizeGeometricPath(scene,
+                               setup,
+                               setup.getSolutionPath(),
+                               planner_kind,
+                               "fresh OMPL solve",
+                               exact_solution,
+                               solve_attempts,
+                               approximate_attempts,
+                               start_time,
+                               deadline);
 }
 
 PlanResult PlanPath(Ur5Scene& scene,
@@ -1490,6 +1538,46 @@ PlanResult PlanPath(Ur5Scene& scene,
   setup.setup();
   return RunPlanPipeline(scene, setup, planner, planner_kind);
 }
+
+PlanResult PlanFromReusablePath(Ur5Scene& scene,
+                                const JointArray& home_q,
+                                const JointArray& goal_q,
+                                const std::vector<JointArray>& reusable_path_knots,
+                                PlannerKind planner_kind = PlannerKind::kRrtConnect) {
+  using Clock = std::chrono::steady_clock;
+  const auto start_time = Clock::now();
+  const auto deadline =
+      start_time + std::chrono::duration_cast<Clock::duration>(
+                       std::chrono::duration<double>(kPlanningTimeBudgetSeconds));
+
+  auto space = MakePlanningStateSpace(scene, goal_q);
+  og::SimpleSetup setup(space);
+  setup.setStateValidityChecker([&scene](const ob::State* state) {
+    return scene.IsStateValid(StateToJoints(state));
+  });
+  setup.setPlanner(MakePlanner(setup.getSpaceInformation(), planner_kind));
+  SetStartAndGoal(setup, space, home_q, goal_q);
+  setup.setup();
+
+  og::PathGeometric raw_path =
+      JointsToPathGeometric(setup.getSpaceInformation(), reusable_path_knots);
+  const auto [still_valid, repaired] = raw_path.checkAndRepair(64);
+  if (!still_valid && !repaired) {
+    throw std::runtime_error("Cached OMPL path is no longer valid");
+  }
+
+  return FinalizeGeometricPath(scene,
+                               setup,
+                               raw_path,
+                               planner_kind,
+                               "cached reusable path",
+                               true,
+                               0,
+                               0,
+                               start_time,
+                               deadline);
+}
+
 
 void ValidatePlannedPath(Ur5Scene& scene, const std::vector<JointArray>& path) {
   int contact_states = 0;
