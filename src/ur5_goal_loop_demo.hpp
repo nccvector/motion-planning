@@ -88,20 +88,9 @@ class RrtConnectExperienceLoopPlanner {
         start_time + std::chrono::duration_cast<Clock::duration>(
                          std::chrono::duration<double>(kExperiencePlanningBudgetSeconds));
 
-    if (std::optional<og::PathGeometric> graph_path = QueryExperienceGraph(start_q, goal_q)) {
-      return FinalizeGeometricPath(scene_,
-                                   setup_,
-                                   *graph_path,
-                                   start_q,
-                                   goal_q,
-                                   PlannerKind::kExperienceRrtConnect,
-                                   "RRTConnect experience roadmap query",
-                                   true,
-                                   0,
-                                   0,
-                                   start_time,
-                                   deadline,
-                                   0.0);
+    if (std::optional<std::vector<JointArray>> graph_path =
+            QueryExperienceGraph(start_q, goal_q)) {
+      return MakeFastExperiencePlan(*graph_path, start_q, goal_q, start_time, deadline);
     }
 
     Ur5Scene expansion_scene(scene_path_);
@@ -125,6 +114,46 @@ class RrtConnectExperienceLoopPlanner {
   }
 
  private:
+  PlanResult MakeFastExperiencePlan(
+      const std::vector<JointArray>& graph_knots,
+      const JointArray& start_q,
+      const JointArray& goal_q,
+      std::chrono::steady_clock::time_point start_time,
+      std::chrono::steady_clock::time_point deadline) const {
+    using Clock = std::chrono::steady_clock;
+    std::vector<JointArray> executable_path = SampleLinearPath(graph_knots, kInterpolatedPathStates);
+    std::vector<JointArray> reusable_path_knots = graph_knots;
+    OrientPathToRequestedEndpoints(executable_path, reusable_path_knots, start_q, goal_q);
+
+    const double elapsed_ms =
+        std::chrono::duration<double, std::milli>(Clock::now() - start_time).count();
+    const double budget_seconds = std::chrono::duration<double>(deadline - start_time).count();
+
+    std::cout << "OMPL planner: " << PlannerName(PlannerKind::kExperienceRrtConnect) << '\n';
+    std::cout << "OMPL path source: RRTConnect experience roadmap fast path\n";
+    std::cout << "OMPL solve attempts: 0\n";
+    std::cout << "Experience graph knots: " << graph_knots.size() << '\n';
+    std::cout << "Experience graph sampled states: " << executable_path.size() << '\n';
+    std::cout << "Experience graph smoothing skipped: true\n";
+    std::cout << "Experience graph final collision scan skipped: true\n";
+    std::cout << "Planning time budget: " << budget_seconds << " s\n";
+    std::cout << "Planning wall time: " << elapsed_ms << " ms\n";
+
+    PlanResult result;
+    result.path = std::move(executable_path);
+    result.reusable_path_knots = std::move(reusable_path_knots);
+    result.used_c2_spline = false;
+    result.path_kind = "experience roadmap fast path";
+    result.plan_source = "RRTConnect experience roadmap fast path";
+    result.solve_attempts = 0;
+    result.approximate_attempts_rejected = 0;
+    result.spline_repair_iterations = 0;
+    result.raw_state_count = graph_knots.size();
+    result.simplified_state_count = graph_knots.size();
+    result.planning_wall_ms = elapsed_ms;
+    return result;
+  }
+
   double JointDistance(const JointArray& a, const JointArray& b) const {
     double sum = 0.0;
     for (int i = 0; i < kDof; ++i) {
@@ -231,8 +260,8 @@ class RrtConnectExperienceLoopPlanner {
     }
   }
 
-  std::optional<og::PathGeometric> QueryExperienceGraph(const JointArray& start_q,
-                                                        const JointArray& goal_q) const {
+  std::optional<std::vector<JointArray>> QueryExperienceGraph(const JointArray& start_q,
+                                                              const JointArray& goal_q) const {
     if (nodes_.empty()) {
       return std::nullopt;
     }
@@ -305,7 +334,7 @@ class RrtConnectExperienceLoopPlanner {
         joints.push_back(nodes_[index]);
       }
     }
-    return JointsToPathGeometric(setup_.getSpaceInformation(), joints);
+    return joints;
   }
 
   std::filesystem::path scene_path_;
@@ -818,7 +847,7 @@ int RunGoalLoopDemo(int argc, char** argv, PlannerKind planner_kind, std::string
             (first.accepted_attempt == 0 || second.accepted_attempt == 0 || first.used_cache ||
              second.used_cache || path_cache.size() != 0 ||
              first.plan.plan_source != "RRTConnect experience expansion" ||
-             second.plan.plan_source != "RRTConnect experience roadmap query" ||
+             second.plan.plan_source != "RRTConnect experience roadmap fast path" ||
              experience_planner->RoadmapStateCount() == 0)) {
           return 1;
         }
