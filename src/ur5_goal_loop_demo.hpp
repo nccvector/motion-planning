@@ -64,9 +64,9 @@ struct CachedLoopPath {
 using LoopPathCache =
     std::unordered_map<LoopTransitionKey, CachedLoopPath, LoopTransitionKeyHash>;
 
-class RrtConnectExperienceLoopPlanner {
+class RrtConnectExperienceRoadmapLoopPlanner {
  public:
-  explicit RrtConnectExperienceLoopPlanner(const std::filesystem::path& scene_path)
+  explicit RrtConnectExperienceRoadmapLoopPlanner(const std::filesystem::path& scene_path)
       : scene_path_(scene_path),
         scene_(scene_path),
         space_(MakePlanningStateSpace(scene_, JointArray{}, false)),
@@ -97,8 +97,8 @@ class RrtConnectExperienceLoopPlanner {
     PlanResult expanded = PlanPath(expansion_scene,
                                    start_q,
                                    goal_q,
-                                   PlannerKind::kExperienceRrtConnect,
-                                   "RRTConnect experience expansion",
+                                   PlannerKind::kRrtConnectExperienceRoadmap,
+                                   "RRTConnect experience roadmap expansion",
                                    kExperienceExpansionBudgetSeconds,
                                    true);
     InsertExperiencePath(expanded.path);
@@ -129,7 +129,7 @@ class RrtConnectExperienceLoopPlanner {
         std::chrono::duration<double, std::milli>(Clock::now() - start_time).count();
     const double budget_seconds = std::chrono::duration<double>(deadline - start_time).count();
 
-    std::cout << "OMPL planner: " << PlannerName(PlannerKind::kExperienceRrtConnect) << '\n';
+    std::cout << "OMPL planner: " << PlannerName(PlannerKind::kRrtConnectExperienceRoadmap) << '\n';
     std::cout << "OMPL path source: RRTConnect experience roadmap fast path\n";
     std::cout << "OMPL solve attempts: 0\n";
     std::cout << "Experience graph knots: " << graph_knots.size() << '\n';
@@ -427,14 +427,14 @@ LoopPlanningResult PlanWithRetries(const std::filesystem::path& scene_path,
                                    PlannerKind planner_kind,
                                    LoopPathCache* path_cache = nullptr,
                                    std::optional<LoopTransitionKey> cache_key = std::nullopt,
-                                   RrtConnectExperienceLoopPlanner* experience_planner = nullptr) {
+                                   RrtConnectExperienceRoadmapLoopPlanner* experience_planner = nullptr) {
   LoopPlanningResult result;
-  if (planner_kind == PlannerKind::kExperienceRrtConnect && experience_planner != nullptr) {
+  if (planner_kind == PlannerKind::kRrtConnectExperienceRoadmap && experience_planner != nullptr) {
     const double budget_seconds = experience_planner->NextPlanningBudgetSeconds();
     try {
       UpdatePlanningStatus(status,
                            1,
-                           "RRTConnect experience " +
+                           "RRTConnect experience roadmap " +
                                std::to_string(static_cast<int>(kExperienceExpansionBudgetSeconds)) +
                                " s expansion if graph misses",
                            {},
@@ -446,17 +446,19 @@ LoopPlanningResult PlanWithRetries(const std::filesystem::path& scene_path,
       result.budget_seconds = budget_seconds;
       result.roadmap_states = experience_planner->RoadmapStateCount();
       result.used_cache = false;
-      UpdatePlanningStatus(status, 1, "RRTConnect experience query succeeded", {}, 1, budget_seconds);
+      UpdatePlanningStatus(
+          status, 1, "RRTConnect experience roadmap query succeeded", {}, 1, budget_seconds);
       return result;
     } catch (const std::exception& e) {
       result.max_attempts = 1;
       result.budget_seconds = budget_seconds;
       result.roadmap_states = experience_planner->RoadmapStateCount();
-      result.error = "RRTConnect experience exhausted " +
+      result.error = "RRTConnect experience roadmap exhausted " +
                      std::to_string(static_cast<int>(budget_seconds)) +
                      " s without connecting this query; roadmap states=" +
                      std::to_string(result.roadmap_states) + "; " + e.what();
-      UpdatePlanningStatus(status, 1, "RRTConnect experience query failed", result.error, 1, budget_seconds);
+      UpdatePlanningStatus(
+          status, 1, "RRTConnect experience roadmap query failed", result.error, 1, budget_seconds);
       return result;
     }
   }
@@ -802,8 +804,8 @@ int RunGoalLoopDemo(int argc, char** argv, PlannerKind planner_kind, std::string
       }
       if (check_cache) {
         LoopPathCache path_cache;
-        std::optional<RrtConnectExperienceLoopPlanner> experience_planner;
-        if (planner_kind == PlannerKind::kExperienceRrtConnect) {
+        std::optional<RrtConnectExperienceRoadmapLoopPlanner> experience_planner;
+        if (planner_kind == PlannerKind::kRrtConnectExperienceRoadmap) {
           experience_planner.emplace(scene_path);
         }
         SharedPlanningStatus first_status;
@@ -843,15 +845,15 @@ int RunGoalLoopDemo(int argc, char** argv, PlannerKind planner_kind, std::string
              !second.used_cache || path_cache.size() != 1)) {
           return 1;
         }
-        if (planner_kind == PlannerKind::kExperienceRrtConnect &&
+        if (planner_kind == PlannerKind::kRrtConnectExperienceRoadmap &&
             (first.accepted_attempt == 0 || second.accepted_attempt == 0 || first.used_cache ||
              second.used_cache || path_cache.size() != 0 ||
-             first.plan.plan_source != "RRTConnect experience expansion" ||
+             first.plan.plan_source != "RRTConnect experience roadmap expansion" ||
              second.plan.plan_source != "RRTConnect experience roadmap fast path" ||
              experience_planner->RoadmapStateCount() == 0)) {
           return 1;
         }
-        if (planner_kind != PlannerKind::kRrtConnect && planner_kind != PlannerKind::kExperienceRrtConnect &&
+        if (planner_kind != PlannerKind::kRrtConnect && planner_kind != PlannerKind::kRrtConnectExperienceRoadmap &&
             second.used_cache) {
           return 1;
         }
@@ -859,8 +861,8 @@ int RunGoalLoopDemo(int argc, char** argv, PlannerKind planner_kind, std::string
       if (check_transitions) {
         std::array<int, kWindowSpecs.size()> transition_window_hits{};
         LoopPathCache path_cache;
-        std::optional<RrtConnectExperienceLoopPlanner> experience_planner;
-        if (planner_kind == PlannerKind::kExperienceRrtConnect) {
+        std::optional<RrtConnectExperienceRoadmapLoopPlanner> experience_planner;
+        if (planner_kind == PlannerKind::kRrtConnectExperienceRoadmap) {
           experience_planner.emplace(scene_path);
         }
         for (std::size_t i = 0; i < goals.size(); ++i) {
@@ -909,8 +911,8 @@ int RunGoalLoopDemo(int argc, char** argv, PlannerKind planner_kind, std::string
     LivePidViewer viewer(scene, {}, true);
     viewer.RenderStatus(std::string(demo_title) + "\nStarting at goal 1", "Esc: stop");
     LoopPathCache path_cache;
-    std::optional<RrtConnectExperienceLoopPlanner> experience_planner;
-    if (planner_kind == PlannerKind::kExperienceRrtConnect) {
+    std::optional<RrtConnectExperienceRoadmapLoopPlanner> experience_planner;
+    if (planner_kind == PlannerKind::kRrtConnectExperienceRoadmap) {
       experience_planner.emplace(scene_path);
     }
 
@@ -954,8 +956,8 @@ int RunGoalLoopDemo(int argc, char** argv, PlannerKind planner_kind, std::string
         std::cerr << "last_error=" << planning.error << '\n';
         std::ostringstream left;
         left << demo_title << "\n";
-        if (planner_kind == PlannerKind::kExperienceRrtConnect) {
-          left << "RRTConnect experience budget exhausted\n"
+        if (planner_kind == PlannerKind::kRrtConnectExperienceRoadmap) {
+          left << "RRTConnect experience roadmap budget exhausted\n"
                << "Segment " << current_index + 1 << " -> " << next_index + 1 << "\n"
                << "Budget: " << std::fixed << std::setprecision(0) << planning.budget_seconds
                << " s\n"

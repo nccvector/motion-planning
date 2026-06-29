@@ -149,8 +149,8 @@ endfunction()
 
 add_ur5_goal_loop_demo(ur5_goal_loop_demo src/ur5_goal_loop_demo.cpp)
 add_ur5_goal_loop_demo(
-  ur5_goal_loop_informed_rrtstar_demo
-  src/ur5_goal_loop_informed_rrtstar_demo.cpp
+  ur5_goal_loop_rrtconnect_experience_roadmap_demo
+  src/ur5_goal_loop_rrtconnect_experience_roadmap_demo.cpp
 )
 
 add_executable(ur5_goal_monte_carlo
@@ -201,14 +201,14 @@ target_compile_definitions(ur5_path_diagnose
 if(MSVC)
   target_compile_options(ur5_clutter_plan PRIVATE /W4)
   target_compile_options(ur5_goal_loop_demo PRIVATE /W4)
-  target_compile_options(ur5_goal_loop_informed_rrtstar_demo PRIVATE /W4)
+  target_compile_options(ur5_goal_loop_rrtconnect_experience_roadmap_demo PRIVATE /W4)
   target_compile_options(ur5_goal_monte_carlo PRIVATE /W4)
   target_compile_options(ur5_path_replay PRIVATE /W4)
   target_compile_options(ur5_path_diagnose PRIVATE /W4)
 else()
   target_compile_options(ur5_clutter_plan PRIVATE -Wall -Wextra -Wpedantic)
   target_compile_options(ur5_goal_loop_demo PRIVATE -Wall -Wextra -Wpedantic -Wno-unused-function)
-  target_compile_options(ur5_goal_loop_informed_rrtstar_demo PRIVATE
+  target_compile_options(ur5_goal_loop_rrtconnect_experience_roadmap_demo PRIVATE
     -Wall -Wextra -Wpedantic -Wno-unused-function)
   target_compile_options(ur5_goal_monte_carlo PRIVATE -Wall -Wextra -Wpedantic -Wno-unused-function)
   target_compile_options(ur5_path_replay PRIVATE -Wall -Wextra -Wpedantic)

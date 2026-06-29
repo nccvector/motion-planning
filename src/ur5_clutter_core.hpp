@@ -132,7 +132,7 @@ struct PlanResult {
 enum class PlannerKind {
   kRrtConnect,
   kInformedRrtStar,
-  kExperienceRrtConnect,
+  kRrtConnectExperienceRoadmap,
 };
 
 std::string_view PlannerName(PlannerKind planner_kind) {
@@ -141,8 +141,8 @@ std::string_view PlannerName(PlannerKind planner_kind) {
       return "RRTConnect";
     case PlannerKind::kInformedRrtStar:
       return "InformedRRTstar";
-    case PlannerKind::kExperienceRrtConnect:
-      return "RRTConnectExperience";
+    case PlannerKind::kRrtConnectExperienceRoadmap:
+      return "RRTConnectExperienceRoadmap";
   }
   return "unknown";
 }
@@ -1592,7 +1592,7 @@ PlanResult PlanPath(Ur5Scene& scene,
                     double planning_budget_seconds = kPlanningTimeBudgetSeconds,
                     bool preserve_planner_between_attempts = false) {
   auto space =
-      MakePlanningStateSpace(scene, goal_q, planner_kind != PlannerKind::kExperienceRrtConnect);
+      MakePlanningStateSpace(scene, goal_q, planner_kind != PlannerKind::kRrtConnectExperienceRoadmap);
   og::SimpleSetup setup(space);
   setup.setStateValidityChecker([&scene](const ob::State* state) {
     return scene.IsStateValid(StateToJoints(state));
@@ -1602,7 +1602,7 @@ PlanResult PlanPath(Ur5Scene& scene,
   SetStartAndGoal(setup, space, home_q, goal_q);
   setup.setup();
   const double sampler_goal_bias =
-      planner_kind == PlannerKind::kExperienceRrtConnect ? 0.0 : kGoalSampleBias;
+      planner_kind == PlannerKind::kRrtConnectExperienceRoadmap ? 0.0 : kGoalSampleBias;
   return RunPlanPipeline(scene,
                          setup,
                          planner,
