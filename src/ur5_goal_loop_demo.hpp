@@ -2,11 +2,16 @@
 
 #include "ur5_clutter_core.hpp"
 
+#include <atomic>
+#include <condition_variable>
+#include <cstdint>
 #include <functional>
 #include <future>
 #include <limits>
 #include <mutex>
 #include <queue>
+#include <shared_mutex>
+#include <thread>
 #include <tuple>
 #include <unordered_map>
 
@@ -18,6 +23,9 @@ constexpr double kExperienceExpansionBudgetSeconds = kExperiencePlanningBudgetSe
 constexpr unsigned int kExperienceConnectorCandidates = 96;
 constexpr unsigned int kExperienceRoadmapConnectorCandidates = 16;
 constexpr double kExperienceNodeMergeTolerance = 0.015;
+constexpr double kExperienceOptimizerBudgetSeconds = 2.0;
+constexpr double kExperienceOptimizerImprovementRatio = 0.98;
+constexpr unsigned int kExperienceShortcutCandidatesPerPass = 64;
 
 struct SharedPlanningStatus {
   std::mutex mutex;
@@ -64,6 +72,12 @@ struct CachedLoopPath {
 using LoopPathCache =
     std::unordered_map<LoopTransitionKey, CachedLoopPath, LoopTransitionKeyHash>;
 
+struct RoadmapOptimizerStats {
+  std::uint64_t shortcut_edges_added = 0;
+  std::uint64_t rrt_attempts = 0;
+  std::uint64_t rrt_paths_added = 0;
+};
+
 class RrtConnectExperienceRoadmapLoopPlanner {
  public:
   explicit RrtConnectExperienceRoadmapLoopPlanner(const std::filesystem::path& scene_path)
@@ -76,6 +90,42 @@ class RrtConnectExperienceRoadmapLoopPlanner {
     });
     setup_.setPlanner(MakePlanner(setup_.getSpaceInformation(), PlannerKind::kRrtConnect));
     setup_.setup();
+    optimizer_thread_ = std::thread(&RrtConnectExperienceRoadmapLoopPlanner::OptimizerMain, this);
+  }
+
+  ~RrtConnectExperienceRoadmapLoopPlanner() {
+    StopOptimizer();
+  }
+
+  RrtConnectExperienceRoadmapLoopPlanner(const RrtConnectExperienceRoadmapLoopPlanner&) = delete;
+  RrtConnectExperienceRoadmapLoopPlanner& operator=(
+      const RrtConnectExperienceRoadmapLoopPlanner&) = delete;
+
+  void BeginExecutionOptimization(const JointArray& start_q,
+                                  const JointArray& goal_q,
+                                  const std::vector<JointArray>& roadmap_path) {
+    if (roadmap_path.size() < 2) {
+      return;
+    }
+    {
+      std::lock_guard lock(optimizer_mutex_);
+      optimizer_request_.active = true;
+      optimizer_request_.start_q = start_q;
+      optimizer_request_.goal_q = goal_q;
+      optimizer_request_.roadmap_path = roadmap_path;
+      optimizer_request_.roadmap_cost = JointPathLength(roadmap_path);
+      optimizer_request_.generation = ++optimizer_generation_;
+    }
+    optimizer_cv_.notify_one();
+  }
+
+  void EndExecutionOptimization() {
+    {
+      std::lock_guard lock(optimizer_mutex_);
+      optimizer_request_.active = false;
+      ++optimizer_generation_;
+    }
+    optimizer_cv_.notify_all();
   }
 
   PlanResult Plan(const JointArray& start_q, const JointArray& goal_q) {
@@ -101,12 +151,35 @@ class RrtConnectExperienceRoadmapLoopPlanner {
                                    "RRTConnect experience roadmap expansion",
                                    kExperienceExpansionBudgetSeconds,
                                    true);
-    InsertExperiencePath(expanded.path);
+    InsertExperiencePath(expanded.path,
+                         [this](const JointArray& from, const JointArray& to) {
+                           return MotionValid(from, to);
+                         });
     return expanded;
   }
 
   unsigned int RoadmapStateCount() const {
+    std::shared_lock lock(roadmap_mutex_);
     return static_cast<unsigned int>(nodes_.size());
+  }
+
+  RoadmapOptimizerStats OptimizerStats() const {
+    return RoadmapOptimizerStats{
+        optimizer_shortcut_edges_added_.load(),
+        optimizer_rrt_attempts_.load(),
+        optimizer_rrt_paths_added_.load(),
+    };
+  }
+
+  bool WaitForOptimizerIdle(std::chrono::milliseconds timeout) const {
+    const auto deadline = std::chrono::steady_clock::now() + timeout;
+    while (std::chrono::steady_clock::now() < deadline) {
+      if (optimizer_inflight_attempts_.load() == 0) {
+        return true;
+      }
+      std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    }
+    return optimizer_inflight_attempts_.load() == 0;
   }
 
   double NextPlanningBudgetSeconds() const {
@@ -114,6 +187,21 @@ class RrtConnectExperienceRoadmapLoopPlanner {
   }
 
  private:
+  struct RoadmapSnapshot {
+    std::vector<JointArray> nodes;
+    std::vector<std::vector<std::pair<std::size_t, double>>> adjacency;
+    std::uint64_t version = 0;
+  };
+
+  struct OptimizerRequest {
+    bool active = false;
+    std::uint64_t generation = 0;
+    JointArray start_q{};
+    JointArray goal_q{};
+    std::vector<JointArray> roadmap_path;
+    double roadmap_cost = std::numeric_limits<double>::infinity();
+  };
+
   PlanResult MakeFastExperiencePlan(
       const std::vector<JointArray>& graph_knots,
       const JointArray& start_q,
@@ -154,7 +242,22 @@ class RrtConnectExperienceRoadmapLoopPlanner {
     return result;
   }
 
+  static double JointPathLength(const std::vector<JointArray>& path) {
+    if (path.size() < 2) {
+      return 0.0;
+    }
+    double length = 0.0;
+    for (std::size_t i = 1; i < path.size(); ++i) {
+      length += JointDistanceStatic(path[i - 1], path[i]);
+    }
+    return length;
+  }
+
   double JointDistance(const JointArray& a, const JointArray& b) const {
+    return JointDistanceStatic(a, b);
+  }
+
+  static double JointDistanceStatic(const JointArray& a, const JointArray& b) {
     double sum = 0.0;
     for (int i = 0; i < kDof; ++i) {
       const double d = a[i] - b[i];
@@ -163,15 +266,27 @@ class RrtConnectExperienceRoadmapLoopPlanner {
     return std::sqrt(sum);
   }
 
-  bool MotionValid(const JointArray& from, const JointArray& to) const {
-    ob::ScopedState<> from_state(space_);
-    ob::ScopedState<> to_state(space_);
+  static bool MotionValidWith(const ob::StateSpacePtr& space,
+                              og::SimpleSetup& setup,
+                              const JointArray& from,
+                              const JointArray& to) {
+    ob::ScopedState<> from_state(space);
+    ob::ScopedState<> to_state(space);
     FillState(from, from_state);
     FillState(to, to_state);
-    return setup_.getSpaceInformation()->checkMotion(from_state.get(), to_state.get());
+    return setup.getSpaceInformation()->checkMotion(from_state.get(), to_state.get());
   }
 
-  std::size_t FindOrAddNode(const JointArray& q) {
+  bool MotionValid(const JointArray& from, const JointArray& to) {
+    return MotionValidWith(space_, setup_, from, to);
+  }
+
+  RoadmapSnapshot SnapshotRoadmap() const {
+    std::shared_lock lock(roadmap_mutex_);
+    return RoadmapSnapshot{nodes_, adjacency_, roadmap_version_};
+  }
+
+  std::size_t FindOrAddNodeLocked(const JointArray& q) {
     for (std::size_t i = 0; i < nodes_.size(); ++i) {
       if (MaxJointDelta(nodes_[i], q) <= kExperienceNodeMergeTolerance) {
         return i;
@@ -182,67 +297,116 @@ class RrtConnectExperienceRoadmapLoopPlanner {
     return nodes_.size() - 1;
   }
 
-  void AddExperienceEdge(std::size_t a, std::size_t b) {
+  bool AddExperienceEdgeLocked(std::size_t a, std::size_t b) {
     if (a == b) {
-      return;
+      return false;
     }
     const double weight = JointDistance(nodes_[a], nodes_[b]);
     auto add_one_way = [&](std::size_t from, std::size_t to) {
-      for (const auto& [existing, _] : adjacency_[from]) {
+      for (auto& [existing, existing_weight] : adjacency_[from]) {
         if (existing == to) {
-          return;
+          if (weight + 1e-9 < existing_weight) {
+            existing_weight = weight;
+            return true;
+          }
+          return false;
         }
       }
       adjacency_[from].push_back({to, weight});
+      return true;
     };
-    add_one_way(a, b);
-    add_one_way(b, a);
+    const bool forward_changed = add_one_way(a, b);
+    const bool backward_changed = add_one_way(b, a);
+    roadmap_version_ += (forward_changed || backward_changed) ? 1 : 0;
+    return forward_changed || backward_changed;
   }
 
-  void AddRoadmapConnectors(std::size_t node_index) {
-    std::vector<std::pair<double, std::size_t>> candidates;
-    candidates.reserve(nodes_.size());
-    for (std::size_t i = 0; i < nodes_.size(); ++i) {
-      if (i == node_index) {
-        continue;
-      }
-      candidates.push_back({JointDistance(nodes_[node_index], nodes_[i]), i});
+  void AddRoadmapConnectors(
+      std::vector<std::size_t> node_indices,
+      const std::function<bool(const JointArray&, const JointArray&)>& motion_valid) {
+    if (node_indices.empty()) {
+      return;
     }
-    std::sort(candidates.begin(), candidates.end());
+    std::sort(node_indices.begin(), node_indices.end());
+    node_indices.erase(std::unique(node_indices.begin(), node_indices.end()), node_indices.end());
 
-    unsigned int connected = 0;
-    for (const auto& [_, target] : candidates) {
-      if (connected >= kExperienceRoadmapConnectorCandidates) {
-        break;
-      }
-      if (!MotionValid(nodes_[node_index], nodes_[target])) {
+    const RoadmapSnapshot snapshot = SnapshotRoadmap();
+    std::vector<std::pair<std::size_t, std::size_t>> valid_edges;
+    for (const std::size_t node_index : node_indices) {
+      if (node_index >= snapshot.nodes.size()) {
         continue;
       }
-      AddExperienceEdge(node_index, target);
-      ++connected;
+      std::vector<std::pair<double, std::size_t>> candidates;
+      candidates.reserve(snapshot.nodes.size());
+      for (std::size_t i = 0; i < snapshot.nodes.size(); ++i) {
+        if (i == node_index) {
+          continue;
+        }
+        candidates.push_back({JointDistance(snapshot.nodes[node_index], snapshot.nodes[i]), i});
+      }
+      std::sort(candidates.begin(), candidates.end());
+
+      unsigned int connected = 0;
+      for (const auto& [_, target] : candidates) {
+        if (connected >= kExperienceRoadmapConnectorCandidates) {
+          break;
+        }
+        if (!motion_valid(snapshot.nodes[node_index], snapshot.nodes[target])) {
+          continue;
+        }
+        valid_edges.push_back({node_index, target});
+        ++connected;
+      }
+    }
+
+    std::unique_lock lock(roadmap_mutex_);
+    for (const auto& [from, to] : valid_edges) {
+      if (from < nodes_.size() && to < nodes_.size()) {
+        AddExperienceEdgeLocked(from, to);
+      }
     }
   }
 
-  void InsertExperiencePath(const std::vector<JointArray>& path) {
+  void InsertExperiencePath(
+      const std::vector<JointArray>& path,
+      const std::function<bool(const JointArray&, const JointArray&)>& motion_valid) {
+    if (path.empty()) {
+      return;
+    }
+    std::vector<std::size_t> path_indices;
+    path_indices.reserve(path.size());
     std::optional<std::size_t> previous;
-    for (const JointArray& q : path) {
-      const std::size_t current = FindOrAddNode(q);
-      if (previous.has_value()) {
-        AddExperienceEdge(*previous, current);
+    {
+      std::unique_lock lock(roadmap_mutex_);
+      for (const JointArray& q : path) {
+        const std::size_t current = FindOrAddNodeLocked(q);
+        path_indices.push_back(current);
+        if (previous.has_value()) {
+          AddExperienceEdgeLocked(*previous, current);
+        }
+        previous = current;
       }
-      AddRoadmapConnectors(current);
-      previous = current;
     }
+    AddRoadmapConnectors(std::move(path_indices), motion_valid);
+  }
+
+  bool CommitShortcutEdge(const JointArray& from, const JointArray& to) {
+    std::unique_lock lock(roadmap_mutex_);
+    const std::size_t from_index = FindOrAddNodeLocked(from);
+    const std::size_t to_index = FindOrAddNodeLocked(to);
+    return AddExperienceEdgeLocked(from_index, to_index);
   }
 
   void AddTemporaryConnectors(
+      const std::vector<JointArray>& nodes,
       const JointArray& query,
       std::size_t query_index,
-      std::vector<std::vector<std::pair<std::size_t, double>>>& adjacency) const {
+      std::vector<std::vector<std::pair<std::size_t, double>>>& adjacency,
+      const std::function<bool(const JointArray&, const JointArray&)>& motion_valid) const {
     std::vector<std::pair<double, std::size_t>> candidates;
-    candidates.reserve(nodes_.size());
-    for (std::size_t i = 0; i < nodes_.size(); ++i) {
-      candidates.push_back({JointDistance(query, nodes_[i]), i});
+    candidates.reserve(nodes.size());
+    for (std::size_t i = 0; i < nodes.size(); ++i) {
+      candidates.push_back({JointDistance(query, nodes[i]), i});
     }
     std::sort(candidates.begin(), candidates.end());
 
@@ -251,7 +415,7 @@ class RrtConnectExperienceRoadmapLoopPlanner {
       if (connected >= kExperienceConnectorCandidates) {
         break;
       }
-      if (!MotionValid(query, nodes_[target])) {
+      if (!motion_valid(query, nodes[target])) {
         continue;
       }
       adjacency[query_index].push_back({target, distance});
@@ -260,19 +424,22 @@ class RrtConnectExperienceRoadmapLoopPlanner {
     }
   }
 
-  std::optional<std::vector<JointArray>> QueryExperienceGraph(const JointArray& start_q,
-                                                              const JointArray& goal_q) const {
-    if (nodes_.empty()) {
+  std::optional<std::vector<JointArray>> QueryExperienceGraphInSnapshot(
+      const RoadmapSnapshot& snapshot,
+      const JointArray& start_q,
+      const JointArray& goal_q,
+      const std::function<bool(const JointArray&, const JointArray&)>& motion_valid) const {
+    if (snapshot.nodes.empty()) {
       return std::nullopt;
     }
 
-    const std::size_t start_index = nodes_.size();
-    const std::size_t goal_index = nodes_.size() + 1;
-    std::vector<std::vector<std::pair<std::size_t, double>>> adjacency = adjacency_;
-    adjacency.resize(nodes_.size() + 2);
-    AddTemporaryConnectors(start_q, start_index, adjacency);
-    AddTemporaryConnectors(goal_q, goal_index, adjacency);
-    if (MotionValid(start_q, goal_q)) {
+    const std::size_t start_index = snapshot.nodes.size();
+    const std::size_t goal_index = snapshot.nodes.size() + 1;
+    std::vector<std::vector<std::pair<std::size_t, double>>> adjacency = snapshot.adjacency;
+    adjacency.resize(snapshot.nodes.size() + 2);
+    AddTemporaryConnectors(snapshot.nodes, start_q, start_index, adjacency, motion_valid);
+    AddTemporaryConnectors(snapshot.nodes, goal_q, goal_index, adjacency, motion_valid);
+    if (motion_valid(start_q, goal_q)) {
       const double direct_weight = JointDistance(start_q, goal_q);
       adjacency[start_index].push_back({goal_index, direct_weight});
       adjacency[goal_index].push_back({start_index, direct_weight});
@@ -331,18 +498,183 @@ class RrtConnectExperienceRoadmapLoopPlanner {
       } else if (index == goal_index) {
         joints.push_back(goal_q);
       } else {
-        joints.push_back(nodes_[index]);
+        joints.push_back(snapshot.nodes[index]);
       }
     }
     return joints;
+  }
+
+  std::optional<std::vector<JointArray>> QueryExperienceGraph(const JointArray& start_q,
+                                                              const JointArray& goal_q) {
+    const RoadmapSnapshot snapshot = SnapshotRoadmap();
+    return QueryExperienceGraphInSnapshot(
+        snapshot, start_q, goal_q, [this](const JointArray& from, const JointArray& to) {
+          return MotionValid(from, to);
+        });
+  }
+
+  unsigned int TryShortcutRoadmapPath(
+      const OptimizerRequest& request,
+      const std::function<bool(const JointArray&, const JointArray&)>& motion_valid) {
+    if (request.roadmap_path.size() < 3) {
+      return 0;
+    }
+
+    unsigned int checked = 0;
+    unsigned int added = 0;
+    const std::size_t path_size = request.roadmap_path.size();
+    for (std::size_t gap = path_size - 1; gap >= 2; --gap) {
+      for (std::size_t start = 0; start + gap < path_size; ++start) {
+        if (checked >= kExperienceShortcutCandidatesPerPass) {
+          return added;
+        }
+        const std::size_t goal = start + gap;
+        const std::vector<JointArray> subpath(request.roadmap_path.begin() + start,
+                                              request.roadmap_path.begin() + goal + 1);
+        const double existing_length = JointPathLength(subpath);
+        const double direct_length =
+            JointDistance(request.roadmap_path[start], request.roadmap_path[goal]);
+        if (direct_length >= existing_length * kExperienceOptimizerImprovementRatio) {
+          continue;
+        }
+        ++checked;
+        if (!motion_valid(request.roadmap_path[start], request.roadmap_path[goal])) {
+          continue;
+        }
+        added += CommitShortcutEdge(request.roadmap_path[start], request.roadmap_path[goal]) ? 1 : 0;
+      }
+      if (gap == 2) {
+        break;
+      }
+    }
+    if (added > 0) {
+      optimizer_shortcut_edges_added_.fetch_add(added);
+      std::cout << "Roadmap optimizer added shortcut edges: " << added << '\n';
+    }
+    return added;
+  }
+
+  bool TryAddRrtConnectImprovement(
+      const OptimizerRequest& request,
+      const std::function<bool(const JointArray&, const JointArray&)>& motion_valid) {
+    if (stop_optimizer_.load()) {
+      return false;
+    }
+
+    optimizer_rrt_attempts_.fetch_add(1);
+    Ur5Scene optimizer_scene(scene_path_);
+    PlanResult candidate = PlanPath(optimizer_scene,
+                                    request.start_q,
+                                    request.goal_q,
+                                    PlannerKind::kRrtConnectExperienceRoadmap,
+                                    "RRTConnect experience roadmap background optimizer",
+                                    kExperienceOptimizerBudgetSeconds,
+                                    true);
+    const double candidate_cost = JointPathLength(candidate.path);
+    if (candidate.path.size() < 2 || candidate_cost <= 0.0) {
+      return false;
+    }
+
+    double baseline_cost = request.roadmap_cost;
+    const RoadmapSnapshot snapshot = SnapshotRoadmap();
+    if (std::optional<std::vector<JointArray>> current_path =
+            QueryExperienceGraphInSnapshot(snapshot, request.start_q, request.goal_q, motion_valid)) {
+      baseline_cost = std::min(baseline_cost, JointPathLength(*current_path));
+    }
+
+    if (candidate_cost >= baseline_cost * kExperienceOptimizerImprovementRatio) {
+      return false;
+    }
+
+    InsertExperiencePath(candidate.path, motion_valid);
+    optimizer_rrt_paths_added_.fetch_add(1);
+    std::ostringstream out;
+    out << "Roadmap optimizer added shorter RRTConnect path: old_cost=" << baseline_cost
+        << " new_cost=" << candidate_cost << " states=" << candidate.path.size() << '\n';
+    std::cout << out.str();
+    return true;
+  }
+
+  void OptimizerMain() {
+    try {
+      Ur5Scene worker_scene(scene_path_);
+      auto worker_space = MakePlanningStateSpace(worker_scene, JointArray{}, false);
+      og::SimpleSetup worker_setup(worker_space);
+      worker_setup.setStateValidityChecker([&worker_scene](const ob::State* state) {
+        return worker_scene.IsStateValid(StateToJoints(state));
+      });
+      worker_setup.setPlanner(
+          MakePlanner(worker_setup.getSpaceInformation(), PlannerKind::kRrtConnect));
+      worker_setup.setup();
+
+      auto motion_valid = [&](const JointArray& from, const JointArray& to) {
+        return MotionValidWith(worker_space, worker_setup, from, to);
+      };
+
+      while (!stop_optimizer_.load()) {
+        OptimizerRequest request;
+        {
+          std::unique_lock lock(optimizer_mutex_);
+          optimizer_cv_.wait(lock, [&]() {
+            return stop_optimizer_.load() || optimizer_request_.active;
+          });
+          if (stop_optimizer_.load()) {
+            break;
+          }
+          request = optimizer_request_;
+        }
+
+        optimizer_inflight_attempts_.fetch_add(1);
+        try {
+          const unsigned int shortcut_edges = TryShortcutRoadmapPath(request, motion_valid);
+          bool added_rrt_path = false;
+          if (!stop_optimizer_.load()) {
+            added_rrt_path = TryAddRrtConnectImprovement(request, motion_valid);
+          }
+
+          if (shortcut_edges == 0 && !added_rrt_path) {
+            std::unique_lock lock(optimizer_mutex_);
+            optimizer_cv_.wait_for(lock, std::chrono::milliseconds(150), [&]() {
+              return stop_optimizer_.load() || !optimizer_request_.active ||
+                     optimizer_request_.generation != request.generation;
+            });
+          }
+        } catch (const std::exception& e) {
+          std::cout << "Roadmap optimizer attempt skipped: " << e.what() << '\n';
+        }
+        optimizer_inflight_attempts_.fetch_sub(1);
+      }
+    } catch (const std::exception& e) {
+      std::cout << "Roadmap optimizer stopped: " << e.what() << '\n';
+    }
+  }
+
+  void StopOptimizer() {
+    stop_optimizer_.store(true);
+    optimizer_cv_.notify_all();
+    if (optimizer_thread_.joinable()) {
+      optimizer_thread_.join();
+    }
   }
 
   std::filesystem::path scene_path_;
   Ur5Scene scene_;
   ob::StateSpacePtr space_;
   og::SimpleSetup setup_;
+  mutable std::shared_mutex roadmap_mutex_;
   std::vector<JointArray> nodes_;
   std::vector<std::vector<std::pair<std::size_t, double>>> adjacency_;
+  std::uint64_t roadmap_version_ = 0;
+  std::atomic<bool> stop_optimizer_{false};
+  std::thread optimizer_thread_;
+  std::mutex optimizer_mutex_;
+  std::condition_variable optimizer_cv_;
+  OptimizerRequest optimizer_request_;
+  std::uint64_t optimizer_generation_ = 0;
+  std::atomic<std::uint64_t> optimizer_shortcut_edges_added_{0};
+  std::atomic<std::uint64_t> optimizer_rrt_attempts_{0};
+  std::atomic<std::uint64_t> optimizer_rrt_paths_added_{0};
+  std::atomic<std::uint64_t> optimizer_inflight_attempts_{0};
 };
 
 std::string FormatJointArray(const JointArray& q) {
@@ -720,6 +1052,7 @@ int RunGoalLoopDemo(int argc, char** argv, PlannerKind planner_kind, std::string
   bool check_goals = false;
   bool check_transitions = false;
   bool check_cache = false;
+  bool check_optimizer = false;
   std::optional<std::filesystem::path> scene_arg;
   for (int i = 1; i < argc; ++i) {
     const std::string_view arg(argv[i]);
@@ -735,9 +1068,12 @@ int RunGoalLoopDemo(int argc, char** argv, PlannerKind planner_kind, std::string
     } else if (arg == "--check-cache") {
       check_goals = true;
       check_cache = true;
+    } else if (arg == "--check-optimizer") {
+      check_goals = true;
+      check_optimizer = true;
     } else if (arg == "--help" || arg == "-h") {
       std::cout << "Usage: " << argv[0]
-                << " [--live-fast|--live-realtime|--check-goals|--check-transitions|--check-cache]"
+                << " [--live-fast|--live-realtime|--check-goals|--check-transitions|--check-cache|--check-optimizer]"
                    " [scene.xml]\n";
       return 0;
     } else if (!scene_arg.has_value()) {
@@ -855,6 +1191,76 @@ int RunGoalLoopDemo(int argc, char** argv, PlannerKind planner_kind, std::string
         }
         if (planner_kind != PlannerKind::kRrtConnect && planner_kind != PlannerKind::kRrtConnectExperienceRoadmap &&
             second.used_cache) {
+          return 1;
+        }
+      }
+      if (check_optimizer) {
+        if (planner_kind != PlannerKind::kRrtConnectExperienceRoadmap) {
+          std::cerr << "error: --check-optimizer only applies to the RRTConnect experience roadmap demo\n";
+          return 1;
+        }
+
+        RrtConnectExperienceRoadmapLoopPlanner experience_planner(scene_path);
+        SharedPlanningStatus first_status;
+        SharedPlanningStatus second_status;
+        const LoopTransitionKey cache_key{0, 1};
+        const LoopPlanningResult first =
+            PlanWithRetries(scene_path,
+                            goals[0],
+                            goals[1],
+                            first_status,
+                            planner_kind,
+                            nullptr,
+                            cache_key,
+                            &experience_planner);
+        if (first.accepted_attempt == 0 || first.plan.path.empty()) {
+          std::cerr << "optimizer smoke initial plan failed: " << first.error << '\n';
+          return 1;
+        }
+        const LoopPlanningResult second =
+            PlanWithRetries(scene_path,
+                            goals[0],
+                            goals[1],
+                            second_status,
+                            planner_kind,
+                            nullptr,
+                            cache_key,
+                            &experience_planner);
+        if (second.accepted_attempt == 0 || second.plan.path.empty()) {
+          std::cerr << "optimizer smoke roadmap query failed: " << second.error << '\n';
+          return 1;
+        }
+
+        const std::vector<JointArray>& optimizer_path =
+            second.plan.reusable_path_knots.empty() ? second.plan.path
+                                                    : second.plan.reusable_path_knots;
+        const RoadmapOptimizerStats before = experience_planner.OptimizerStats();
+        experience_planner.BeginExecutionOptimization(goals[0], goals[1], optimizer_path);
+
+        RoadmapOptimizerStats after = before;
+        for (int poll = 0; poll < 50; ++poll) {
+          std::this_thread::sleep_for(std::chrono::milliseconds(100));
+          after = experience_planner.OptimizerStats();
+          if (after.shortcut_edges_added > before.shortcut_edges_added ||
+              after.rrt_attempts > before.rrt_attempts ||
+              after.rrt_paths_added > before.rrt_paths_added) {
+            break;
+          }
+        }
+        experience_planner.EndExecutionOptimization();
+        experience_planner.WaitForOptimizerIdle(
+            std::chrono::milliseconds(static_cast<int>((kExperienceOptimizerBudgetSeconds + 1.0) *
+                                                       1000.0)));
+        after = experience_planner.OptimizerStats();
+
+        std::cout << "optimizer smoke shortcut_edges_added="
+                  << after.shortcut_edges_added - before.shortcut_edges_added
+                  << " rrt_attempts=" << after.rrt_attempts - before.rrt_attempts
+                  << " rrt_paths_added=" << after.rrt_paths_added - before.rrt_paths_added
+                  << " roadmap_states=" << experience_planner.RoadmapStateCount() << '\n';
+        if (after.shortcut_edges_added == before.shortcut_edges_added &&
+            after.rrt_attempts == before.rrt_attempts &&
+            after.rrt_paths_added == before.rrt_paths_added) {
           return 1;
         }
       }
@@ -982,18 +1388,35 @@ int RunGoalLoopDemo(int argc, char** argv, PlannerKind planner_kind, std::string
                                planning.plan,
                                planning.accepted_attempt,
                                planning.max_attempts);
+      if (experience_planner) {
+        const std::vector<JointArray>& optimizer_path =
+            planning.plan.reusable_path_knots.empty() ? planning.plan.path
+                                                      : planning.plan.reusable_path_knots;
+        experience_planner->BeginExecutionOptimization(
+            goals[current_index], goals[next_index], optimizer_path);
+      }
       std::this_thread::sleep_for(std::chrono::milliseconds(300));
 
-      ExecuteLoopPath(scene,
-                      viewer,
-                      demo_title,
-                      goals[current_index],
-                      planning.plan,
-                      planning.accepted_attempt,
-                      planning.max_attempts,
-                      current_index,
-                      next_index,
-                      live_realtime);
+      try {
+        ExecuteLoopPath(scene,
+                        viewer,
+                        demo_title,
+                        goals[current_index],
+                        planning.plan,
+                        planning.accepted_attempt,
+                        planning.max_attempts,
+                        current_index,
+                        next_index,
+                        live_realtime);
+      } catch (...) {
+        if (experience_planner) {
+          experience_planner->EndExecutionOptimization();
+        }
+        throw;
+      }
+      if (experience_planner) {
+        experience_planner->EndExecutionOptimization();
+      }
       current_index = next_index;
     }
   } catch (const std::exception& e) {
