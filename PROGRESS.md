@@ -2,6 +2,58 @@
 
 ## 2026-06-29
 
+- Replaced the non-RRTConnect endless goal loop demo entrypoint with `SPARS2`
+  (`ompl::geometric::SPARStwo`) while keeping the existing executable name
+  `ur5_goal_loop_informed_rrtstar_demo`.
+- Added reusable SPARS2 loop planning state:
+  - one `ReusableSpars2LoopPlanner` owns the planning scene, `SimpleSetup`, and
+    SPARS2 planner,
+  - each later loop transition updates only the start/goal query,
+  - `ReusableSpars2LoopPlanner` preserves planner data between solve attempts
+    and later queries, so the sparse roadmap survives across queries.
+- Kept the RRTConnect path cache restricted to `PlannerKind::kRrtConnect`; the
+  SPARS2 demo does not allocate or consult the loop path cache.
+- Disabled the per-goal biased state sampler for SPARS2 so the reusable roadmap
+  is not tied to the first query goal.
+- Added a mutable goal-biased sampler and a planner-data roadmap query fallback
+  for SPARS2 so the same roadmap can be queried without constructing extra
+  planners or using loop path caches.
+- Removed SPARS2 retries:
+  - the first SPARS2 query gets one 600 second planning budget,
+  - later queries on the same reusable planner get one 1 second budget,
+  - SPARS2 viewer/status text now reports `Attempt 1/1` instead of `1/5`.
+- Tuned the reusable SPARS2 setup for the hard first query:
+  - reduced SPARS2 loop goal sampling bias from the global `0.25` planner bias to
+    a SPARS2-specific `0.02`,
+  - added an active start-goal bridge sampler for `18%` of SPARS2 samples with
+    `0.12 rad` joint noise,
+  - reduced sparse visibility radius from `0.08` to `0.045`,
+  - increased interface support tolerance from `0.002` to `0.004`,
+  - tightened stretch factor to `2.0`,
+  - raised the consecutive-failure limit to `20000`.
+- Each new SPARS2 loop query now calls `clearQuery()` before solve, preserving
+  the roadmap while clearing OMPL's cached start/goal query guards.
+- Fixed SPARS2 telemetry so the console reports the actual SPARS2 sampler goal
+  bias and the active 600 second first-query planning budget.
+- Clarified SPARS2 timeout reporting in the live demo: when the single-query
+  budget expires, the viewer now says `SPARS2 budget exhausted` and shows the
+  segment, budget, and retained roadmap state count.
+- Verified the SPARS2 demo still builds and the goal list is valid, but the
+  first `1 -> 2` transition did not solve inside the previous 60 second SPARS2
+  budget:
+  - `cmake --build build --target ur5_goal_loop_informed_rrtstar_demo -j`
+  - `./build/ur5_goal_loop_informed_rrtstar_demo --check-goals`
+  - `./build/ur5_goal_loop_informed_rrtstar_demo --check-cache` grew the reused
+    SPARS2 roadmap to 5373 states with `cached_entries=0`, but exited nonzero
+    after the single 60 second initial query.
+- Re-ran `./build/ur5_goal_loop_informed_rrtstar_demo --check-cache` before
+  raising the initial budget from 300 to 600 seconds:
+  - first `1 -> 2` SPARS2 query found an exact path in `299.986 s` after creating
+    `52567` states,
+  - the later reused-roadmap query found an exact path in `0.921 s` after adding
+    `87` states,
+  - smoke exited successfully with `cached_entries=0` and
+    `spars2_roadmap_states=52657`.
 - Added a second endless goal loop executable for `InformedRRTstar`:
   `ur5_goal_loop_informed_rrtstar_demo`.
 - Refactored the endless goal loop implementation into

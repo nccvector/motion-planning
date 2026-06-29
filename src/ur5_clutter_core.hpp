@@ -8,6 +8,7 @@
 #include <ompl/base/spaces/RealVectorStateSpace.h>
 #include <ompl/geometric/PathGeometric.h>
 #include <ompl/geometric/SimpleSetup.h>
+#include <ompl/geometric/planners/prm/SPARStwo.h>
 #include <ompl/geometric/planners/rrt/InformedRRTstar.h>
 #include <ompl/geometric/planners/rrt/RRTConnect.h>
 #include <ompl/util/RandomNumbers.h>
@@ -120,6 +121,7 @@ struct PlanResult {
   std::vector<JointArray> reusable_path_knots;
   bool used_c2_spline = false;
   std::string path_kind = "unknown";
+  std::string plan_source = "unknown";
   int solve_attempts = 0;
   int approximate_attempts_rejected = 0;
   int spline_repair_iterations = 0;
@@ -131,6 +133,7 @@ struct PlanResult {
 enum class PlannerKind {
   kRrtConnect,
   kInformedRrtStar,
+  kSpars2,
 };
 
 std::string_view PlannerName(PlannerKind planner_kind) {
@@ -139,6 +142,8 @@ std::string_view PlannerName(PlannerKind planner_kind) {
       return "RRTConnect";
     case PlannerKind::kInformedRrtStar:
       return "InformedRRTstar";
+    case PlannerKind::kSpars2:
+      return "SPARS2";
   }
   return "unknown";
 }
@@ -1255,8 +1260,10 @@ JointArray SelectGoal(Ur5Scene& scene) {
   throw std::runtime_error("No collision-free shelf-side goal candidate found");
 }
 
-std::shared_ptr<ob::RealVectorStateSpace> MakePlanningStateSpace(Ur5Scene& scene,
-                                                                 const JointArray& goal_q) {
+std::shared_ptr<ob::RealVectorStateSpace> MakePlanningStateSpace(
+    Ur5Scene& scene,
+    const JointArray& goal_q,
+    bool use_goal_biased_sampler = true) {
   auto space = std::make_shared<ob::RealVectorStateSpace>(kDof);
   ob::RealVectorBounds bounds(kDof);
   for (int i = 0; i < kDof; ++i) {
@@ -1266,9 +1273,11 @@ std::shared_ptr<ob::RealVectorStateSpace> MakePlanningStateSpace(Ur5Scene& scene
   }
   space->setBounds(bounds);
   space->setLongestValidSegmentFraction(0.004);
-  space->setStateSamplerAllocator([goal_q](const ob::StateSpace* sampler_space) {
-    return std::make_shared<GoalBiasedStateSampler>(sampler_space, goal_q, kGoalSampleBias);
-  });
+  if (use_goal_biased_sampler) {
+    space->setStateSamplerAllocator([goal_q](const ob::StateSpace* sampler_space) {
+      return std::make_shared<GoalBiasedStateSampler>(sampler_space, goal_q, kGoalSampleBias);
+    });
+  }
   return space;
 }
 
@@ -1280,6 +1289,14 @@ ob::PlannerPtr MakePlanner(const ob::SpaceInformationPtr& space_information,
     rrt_star->setGoalBias(kGoalSampleBias);
     rrt_star->setDelayCC(true);
     return rrt_star;
+  }
+  if (planner_kind == PlannerKind::kSpars2) {
+    auto spars2 = std::make_shared<og::SPARStwo>(space_information);
+    spars2->setSparseDeltaFraction(0.045);
+    spars2->setDenseDeltaFraction(0.004);
+    spars2->setStretchFactor(2.0);
+    spars2->setMaxFailures(20000);
+    return spars2;
   }
 
   auto rrt_connect = std::make_shared<og::RRTConnect>(space_information);
@@ -1307,7 +1324,8 @@ PlanResult FinalizeGeometricPath(Ur5Scene& scene,
                                  int solve_attempts,
                                  int approximate_attempts,
                                  std::chrono::steady_clock::time_point start_time,
-                                 std::chrono::steady_clock::time_point deadline) {
+                                 std::chrono::steady_clock::time_point deadline,
+                                 double sampler_goal_bias = kGoalSampleBias) {
   using Clock = std::chrono::steady_clock;
   auto remaining_seconds = [&]() {
     return std::chrono::duration<double>(deadline - Clock::now()).count();
@@ -1406,10 +1424,11 @@ PlanResult FinalizeGeometricPath(Ur5Scene& scene,
       JointPathClearanceViolationCount(scene, planned_path, kRequiredObstacleClearance);
   const double elapsed_ms =
       std::chrono::duration<double, std::milli>(Clock::now() - start_time).count();
+  const double budget_seconds = std::chrono::duration<double>(deadline - start_time).count();
 
   std::cout << "OMPL planner: " << PlannerName(planner_kind) << '\n';
   std::cout << "OMPL path source: " << path_source << '\n';
-  std::cout << "OMPL goal sample bias: " << kGoalSampleBias << '\n';
+  std::cout << "OMPL goal sample bias: " << sampler_goal_bias << '\n';
   std::cout << "OMPL raw path states: " << raw_state_count << '\n';
   std::cout << "OMPL exact solution: " << std::boolalpha << exact_solution << '\n';
   std::cout << "OMPL solve attempts: " << solve_attempts << '\n';
@@ -1424,7 +1443,7 @@ PlanResult FinalizeGeometricPath(Ur5Scene& scene,
   std::cout << "Spline final hard knots: " << spline_knots.size() << '\n';
   std::cout << "Spline repair iterations: " << repair_iterations << '\n';
   std::cout << "Planner used C2 spline: " << std::boolalpha << using_c2 << '\n';
-  std::cout << "Planning time budget: " << kPlanningTimeBudgetSeconds << " s\n";
+  std::cout << "Planning time budget: " << budget_seconds << " s\n";
   std::cout << "Planning wall time: " << elapsed_ms << " ms\n";
   if (using_c2) {
     std::cout << "C2 natural cubic spline samples: " << best_attempt.spline.path.size() << '\n';
@@ -1458,6 +1477,7 @@ PlanResult FinalizeGeometricPath(Ur5Scene& scene,
   result.reusable_path_knots = std::move(reusable_path_knots);
   result.used_c2_spline = using_c2;
   result.path_kind = using_c2 ? "C2 spline smoothed path" : fallback_source;
+  result.plan_source = std::string(path_source);
   result.solve_attempts = solve_attempts;
   result.approximate_attempts_rejected = approximate_attempts;
   result.spline_repair_iterations = repair_iterations;
@@ -1470,7 +1490,9 @@ PlanResult FinalizeGeometricPath(Ur5Scene& scene,
 PlanResult RunPlanPipeline(Ur5Scene& scene,
                            og::SimpleSetup& setup,
                            const ob::PlannerPtr& planner,
-                           PlannerKind planner_kind) {
+                           PlannerKind planner_kind,
+                           bool preserve_planner_between_attempts = false,
+                           std::string_view path_source = "fresh OMPL solve") {
   using Clock = std::chrono::steady_clock;
   const auto start_time = Clock::now();
   const auto deadline =
@@ -1491,10 +1513,15 @@ PlanResult RunPlanPipeline(Ur5Scene& scene,
       break;
     }
     const double solve_budget =
-        std::min(kMaxOmplSolveAttemptSeconds, std::max(kMinOmplSolveAttemptSeconds, usable_time));
+        preserve_planner_between_attempts
+            ? usable_time
+            : std::min(kMaxOmplSolveAttemptSeconds,
+                       std::max(kMinOmplSolveAttemptSeconds, usable_time));
     if (solve_attempts > 0) {
       setup.getProblemDefinition()->clearSolutionPaths();
-      planner->clear();
+      if (!preserve_planner_between_attempts) {
+        planner->clear();
+      }
     }
     ++solve_attempts;
     const auto solved = setup.solve(solve_budget);
@@ -1508,14 +1535,14 @@ PlanResult RunPlanPipeline(Ur5Scene& scene,
   }
   if (!exact_solution) {
     throw std::runtime_error(
-        "OMPL only found approximate paths inside the 3000 ms budget; refusing partial fallback");
+        "OMPL did not find an exact path inside the 3000 ms budget; refusing partial fallback");
   }
 
   return FinalizeGeometricPath(scene,
                                setup,
                                setup.getSolutionPath(),
                                planner_kind,
-                               "fresh OMPL solve",
+                               path_source,
                                exact_solution,
                                solve_attempts,
                                approximate_attempts,
@@ -1527,7 +1554,8 @@ PlanResult PlanPath(Ur5Scene& scene,
                     const JointArray& home_q,
                     const JointArray& goal_q,
                     PlannerKind planner_kind = PlannerKind::kRrtConnect) {
-  auto space = MakePlanningStateSpace(scene, goal_q);
+  auto space =
+      MakePlanningStateSpace(scene, goal_q, planner_kind != PlannerKind::kSpars2);
   og::SimpleSetup setup(space);
   setup.setStateValidityChecker([&scene](const ob::State* state) {
     return scene.IsStateValid(StateToJoints(state));

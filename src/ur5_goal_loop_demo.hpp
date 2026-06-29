@@ -11,10 +11,18 @@
 namespace {
 
 constexpr int kMaxLoopPlanningAttempts = 5;
+constexpr double kInitialSpars2PlanningBudgetSeconds = 600.0;
+constexpr double kSubsequentSpars2PlanningBudgetSeconds = 1.0;
+constexpr double kSpars2GoalSampleBias = 0.02;
+constexpr double kSpars2BridgeSampleBias = 0.18;
+constexpr double kSpars2BridgeNoiseStdDev = 0.12;
 
 struct SharedPlanningStatus {
   std::mutex mutex;
   int attempt = 0;
+  int max_attempts = kMaxLoopPlanningAttempts;
+  double budget_seconds =
+      static_cast<double>(kMaxLoopPlanningAttempts) * kPlanningTimeBudgetSeconds;
   std::string phase = "Queued";
   std::string last_error;
 };
@@ -22,6 +30,10 @@ struct SharedPlanningStatus {
 struct LoopPlanningResult {
   PlanResult plan;
   int accepted_attempt = 0;
+  int max_attempts = kMaxLoopPlanningAttempts;
+  double budget_seconds =
+      static_cast<double>(kMaxLoopPlanningAttempts) * kPlanningTimeBudgetSeconds;
+  unsigned int roadmap_states = 0;
   bool used_cache = false;
   std::string error;
 };
@@ -49,6 +61,279 @@ struct CachedLoopPath {
 
 using LoopPathCache =
     std::unordered_map<LoopTransitionKey, CachedLoopPath, LoopTransitionKeyHash>;
+
+class MutableGoalBiasedStateSampler final : public ob::StateSampler {
+ public:
+  MutableGoalBiasedStateSampler(const ob::StateSpace* space,
+                                const JointArray* start_q,
+                                const JointArray* goal_q,
+                                double goal_bias,
+                                double bridge_bias,
+                                double bridge_noise_stddev)
+      : ob::StateSampler(space),
+        default_sampler_(space->allocDefaultStateSampler()),
+        start_q_(start_q),
+        goal_q_(goal_q),
+        goal_bias_(goal_bias),
+        bridge_bias_(bridge_bias),
+        bridge_noise_stddev_(bridge_noise_stddev) {}
+
+  void sampleUniform(ob::State* state) override {
+    const double draw = rng_.uniform01();
+    if (goal_q_ != nullptr && draw < goal_bias_) {
+      FillState(*goal_q_, state);
+      return;
+    }
+    if (start_q_ != nullptr && goal_q_ != nullptr && draw < goal_bias_ + bridge_bias_) {
+      JointArray q{};
+      const double alpha = rng_.uniform01();
+      for (int i = 0; i < kDof; ++i) {
+        q[i] = (*start_q_)[i] + alpha * ((*goal_q_)[i] - (*start_q_)[i]) +
+               rng_.gaussian(0.0, bridge_noise_stddev_);
+      }
+      FillState(q, state);
+      space_->enforceBounds(state);
+      return;
+    }
+    default_sampler_->sampleUniform(state);
+  }
+
+  void sampleUniformNear(ob::State* state, const ob::State* near, double distance) override {
+    default_sampler_->sampleUniformNear(state, near, distance);
+  }
+
+  void sampleGaussian(ob::State* state, const ob::State* mean, double std_dev) override {
+    default_sampler_->sampleGaussian(state, mean, std_dev);
+  }
+
+ private:
+  ob::StateSamplerPtr default_sampler_;
+  const JointArray* start_q_ = nullptr;
+  const JointArray* goal_q_ = nullptr;
+  double goal_bias_ = 0.0;
+  double bridge_bias_ = 0.0;
+  double bridge_noise_stddev_ = 0.0;
+  ompl::RNG rng_;
+};
+
+class ReusableSpars2LoopPlanner {
+ public:
+  explicit ReusableSpars2LoopPlanner(const std::filesystem::path& scene_path)
+      : scene_(scene_path),
+        space_(MakePlanningStateSpace(scene_, JointArray{}, false)),
+        setup_(space_),
+        planner_(MakePlanner(setup_.getSpaceInformation(), PlannerKind::kSpars2)) {
+    space_->setStateSamplerAllocator([this](const ob::StateSpace* sampler_space) {
+      return std::make_shared<MutableGoalBiasedStateSampler>(
+          sampler_space,
+          &current_start_q_,
+          &current_goal_q_,
+          kSpars2GoalSampleBias,
+          kSpars2BridgeSampleBias,
+          kSpars2BridgeNoiseStdDev);
+    });
+    setup_.setStateValidityChecker([this](const ob::State* state) {
+      return scene_.IsStateValid(StateToJoints(state));
+    });
+    setup_.setPlanner(planner_);
+  }
+
+  PlanResult Plan(const JointArray& start_q, const JointArray& goal_q) {
+    using Clock = std::chrono::steady_clock;
+    const double planning_budget_seconds =
+        first_query_ ? kInitialSpars2PlanningBudgetSeconds
+                     : kSubsequentSpars2PlanningBudgetSeconds;
+    current_start_q_ = start_q;
+    current_goal_q_ = goal_q;
+    SetStartAndGoal(setup_, space_, start_q, goal_q);
+    planner_->clearQuery();
+    setup_.setup();
+    setup_.getProblemDefinition()->clearSolutionPaths();
+
+    const auto start_time = Clock::now();
+    const auto deadline =
+        start_time + std::chrono::duration_cast<Clock::duration>(
+                         std::chrono::duration<double>(planning_budget_seconds));
+    const double solve_budget =
+        std::max(kMinOmplSolveAttemptSeconds,
+                 planning_budget_seconds - kMinimumSplineAttemptBudgetSeconds);
+
+    const auto solved = setup_.solve(solve_budget);
+    first_query_ = false;
+    if (solved == ob::PlannerStatus::EXACT_SOLUTION) {
+      return FinalizeGeometricPath(scene_,
+                                   setup_,
+                                   setup_.getSolutionPath(),
+                                   PlannerKind::kSpars2,
+                                   "SPARS2 reusable roadmap query",
+                                   true,
+                                   1,
+                                   0,
+                                   start_time,
+                                   deadline,
+                                   kSpars2GoalSampleBias);
+    }
+
+    std::optional<og::PathGeometric> roadmap_path = QueryPlannerDataPath();
+    if (roadmap_path.has_value()) {
+      return FinalizeGeometricPath(scene_,
+                                   setup_,
+                                   *roadmap_path,
+                                   PlannerKind::kSpars2,
+                                   "SPARS2 planner-data roadmap query",
+                                   true,
+                                   1,
+                                   solved ? 1 : 0,
+                                   start_time,
+                                   deadline,
+                                   kSpars2GoalSampleBias);
+    }
+
+    throw std::runtime_error(
+        "SPARS2 did not connect the current query through its reusable roadmap");
+  }
+
+  unsigned int RoadmapStateCount() const {
+    const auto spars2 = std::dynamic_pointer_cast<const og::SPARStwo>(planner_);
+    return spars2 == nullptr ? 0U : spars2->milestoneCount();
+  }
+
+  double NextPlanningBudgetSeconds() const {
+    return first_query_ ? kInitialSpars2PlanningBudgetSeconds
+                        : kSubsequentSpars2PlanningBudgetSeconds;
+  }
+
+ private:
+  std::optional<og::PathGeometric> QueryPlannerDataPath() {
+    ob::PlannerData data(setup_.getSpaceInformation());
+    planner_->getPlannerData(data);
+    const unsigned int vertex_count = data.numVertices();
+    if (vertex_count == 0 || data.numStartVertices() == 0 || data.numGoalVertices() == 0) {
+      return std::nullopt;
+    }
+
+    const unsigned int start_index = data.getStartIndex(0);
+    const unsigned int goal_index = data.getGoalIndex(0);
+    if (start_index == ob::PlannerData::INVALID_INDEX ||
+        goal_index == ob::PlannerData::INVALID_INDEX) {
+      return std::nullopt;
+    }
+
+    const auto& space_information = setup_.getSpaceInformation();
+    std::vector<std::vector<std::pair<unsigned int, double>>> adjacency(vertex_count);
+    for (unsigned int v = 0; v < vertex_count; ++v) {
+      std::vector<unsigned int> edges;
+      data.getEdges(v, edges);
+      for (const unsigned int target : edges) {
+        const ob::State* from_state = data.getVertex(v).getState();
+        const ob::State* to_state = data.getVertex(target).getState();
+        if (from_state == nullptr || to_state == nullptr) {
+          continue;
+        }
+        adjacency[v].push_back({target, space_information->distance(from_state, to_state)});
+      }
+    }
+
+    AddTemporaryRoadmapConnectors(data, start_index, adjacency);
+    AddTemporaryRoadmapConnectors(data, goal_index, adjacency);
+
+    std::vector<double> distance(vertex_count, std::numeric_limits<double>::infinity());
+    std::vector<unsigned int> previous(vertex_count, ob::PlannerData::INVALID_INDEX);
+    std::vector<bool> visited(vertex_count, false);
+    distance[start_index] = 0.0;
+
+    for (unsigned int step = 0; step < vertex_count; ++step) {
+      unsigned int current = ob::PlannerData::INVALID_INDEX;
+      double best_distance = std::numeric_limits<double>::infinity();
+      for (unsigned int v = 0; v < vertex_count; ++v) {
+        if (!visited[v] && distance[v] < best_distance) {
+          current = v;
+          best_distance = distance[v];
+        }
+      }
+      if (current == ob::PlannerData::INVALID_INDEX || current == goal_index) {
+        break;
+      }
+
+      visited[current] = true;
+      for (const auto& [target, edge_cost] : adjacency[current]) {
+        const double candidate = distance[current] + edge_cost;
+        if (candidate < distance[target]) {
+          distance[target] = candidate;
+          previous[target] = current;
+        }
+      }
+    }
+
+    if (previous[goal_index] == ob::PlannerData::INVALID_INDEX) {
+      return std::nullopt;
+    }
+
+    std::vector<unsigned int> path_indices;
+    for (unsigned int v = goal_index; v != ob::PlannerData::INVALID_INDEX; v = previous[v]) {
+      path_indices.push_back(v);
+      if (v == start_index) {
+        break;
+      }
+    }
+    if (path_indices.empty() || path_indices.back() != start_index) {
+      return std::nullopt;
+    }
+    std::reverse(path_indices.begin(), path_indices.end());
+
+    og::PathGeometric path(space_information);
+    for (const unsigned int index : path_indices) {
+      const ob::State* state = data.getVertex(index).getState();
+      if (state == nullptr) {
+        return std::nullopt;
+      }
+      path.append(state);
+    }
+    return path;
+  }
+
+  void AddTemporaryRoadmapConnectors(
+      const ob::PlannerData& data,
+      unsigned int query_index,
+      std::vector<std::vector<std::pair<unsigned int, double>>>& adjacency) {
+    const auto& space_information = setup_.getSpaceInformation();
+    const ob::State* query_state = data.getVertex(query_index).getState();
+    if (query_state == nullptr) {
+      return;
+    }
+
+    std::vector<std::pair<double, unsigned int>> candidates;
+    candidates.reserve(data.numVertices());
+    for (unsigned int v = 0; v < data.numVertices(); ++v) {
+      if (v == query_index) {
+        continue;
+      }
+      const ob::State* state = data.getVertex(v).getState();
+      if (state == nullptr) {
+        continue;
+      }
+      candidates.push_back({space_information->distance(query_state, state), v});
+    }
+    std::sort(candidates.begin(), candidates.end());
+
+    for (const auto& [distance, target] : candidates) {
+      const ob::State* target_state = data.getVertex(target).getState();
+      if (target_state == nullptr || !space_information->checkMotion(query_state, target_state)) {
+        continue;
+      }
+      adjacency[query_index].push_back({target, distance});
+      adjacency[target].push_back({query_index, distance});
+    }
+  }
+
+  JointArray current_start_q_{};
+  JointArray current_goal_q_{};
+  bool first_query_ = true;
+  Ur5Scene scene_;
+  ob::StateSpacePtr space_;
+  og::SimpleSetup setup_;
+  ob::PlannerPtr planner_;
+};
 
 std::string FormatJointArray(const JointArray& q) {
   std::ostringstream out;
@@ -105,16 +390,24 @@ std::optional<std::size_t> ShelfWindowIndexForGoal(const std::array<double, 3>& 
 void UpdatePlanningStatus(SharedPlanningStatus& status,
                           int attempt,
                           std::string phase,
-                          std::string last_error = {}) {
+                          std::string last_error = {},
+                          int max_attempts = kMaxLoopPlanningAttempts,
+                          double budget_seconds =
+                              static_cast<double>(kMaxLoopPlanningAttempts) *
+                              kPlanningTimeBudgetSeconds) {
   std::lock_guard lock(status.mutex);
   status.attempt = attempt;
+  status.max_attempts = max_attempts;
+  status.budget_seconds = budget_seconds;
   status.phase = std::move(phase);
   status.last_error = std::move(last_error);
 }
 
-std::tuple<int, std::string, std::string> ReadPlanningStatus(SharedPlanningStatus& status) {
+std::tuple<int, int, double, std::string, std::string> ReadPlanningStatus(
+    SharedPlanningStatus& status) {
   std::lock_guard lock(status.mutex);
-  return {status.attempt, status.phase, status.last_error};
+  return {status.attempt, status.max_attempts, status.budget_seconds, status.phase,
+          status.last_error};
 }
 
 LoopPlanningResult PlanWithRetries(const std::filesystem::path& scene_path,
@@ -123,8 +416,40 @@ LoopPlanningResult PlanWithRetries(const std::filesystem::path& scene_path,
                                    SharedPlanningStatus& status,
                                    PlannerKind planner_kind,
                                    LoopPathCache* path_cache = nullptr,
-                                   std::optional<LoopTransitionKey> cache_key = std::nullopt) {
+                                   std::optional<LoopTransitionKey> cache_key = std::nullopt,
+                                   ReusableSpars2LoopPlanner* spars2_planner = nullptr) {
   LoopPlanningResult result;
+  if (planner_kind == PlannerKind::kSpars2 && spars2_planner != nullptr) {
+    const double budget_seconds = spars2_planner->NextPlanningBudgetSeconds();
+    try {
+      UpdatePlanningStatus(status,
+                           1,
+                           "SPARS2 single query, " +
+                               std::to_string(static_cast<int>(budget_seconds)) + " s budget",
+                           {},
+                           1,
+                           budget_seconds);
+      result.plan = spars2_planner->Plan(start_q, goal_q);
+      result.accepted_attempt = 1;
+      result.max_attempts = 1;
+      result.budget_seconds = budget_seconds;
+      result.roadmap_states = spars2_planner->RoadmapStateCount();
+      result.used_cache = false;
+      UpdatePlanningStatus(status, 1, "SPARS2 query succeeded", {}, 1, budget_seconds);
+      return result;
+    } catch (const std::exception& e) {
+      result.max_attempts = 1;
+      result.budget_seconds = budget_seconds;
+      result.roadmap_states = spars2_planner->RoadmapStateCount();
+      result.error = "SPARS2 exhausted " +
+                     std::to_string(static_cast<int>(budget_seconds)) +
+                     " s without connecting this query; roadmap states=" +
+                     std::to_string(result.roadmap_states) + "; " + e.what();
+      UpdatePlanningStatus(status, 1, "SPARS2 query failed", result.error, 1, budget_seconds);
+      return result;
+    }
+  }
+
   if (planner_kind == PlannerKind::kRrtConnect && path_cache != nullptr && cache_key.has_value()) {
     const auto cached = path_cache->find(*cache_key);
     if (cached != path_cache->end() && !cached->second.reusable_path_knots.empty()) {
@@ -215,9 +540,8 @@ void RenderPlanningProgress(LivePidViewer& viewer,
                             std::size_t from_index,
                             std::size_t to_index,
                             double elapsed_seconds) {
-  const auto [attempt, phase, last_error] = ReadPlanningStatus(status);
-  const double budget_seconds =
-      static_cast<double>(kMaxLoopPlanningAttempts) * kPlanningTimeBudgetSeconds;
+  const auto [attempt, max_attempts, budget_seconds, phase, last_error] =
+      ReadPlanningStatus(status);
   const int percent = std::min(99, static_cast<int>(100.0 * elapsed_seconds / budget_seconds));
 
   std::ostringstream left;
@@ -226,7 +550,7 @@ void RenderPlanningProgress(LivePidViewer& viewer,
        << "Segment " << from_index + 1 << " -> " << to_index + 1 << "\n"
        << phase;
   if (attempt > 0) {
-    left << "\nAttempt " << attempt << "/" << kMaxLoopPlanningAttempts;
+    left << "\nAttempt " << attempt << "/" << max_attempts;
   }
   if (!last_error.empty()) {
     left << "\nLast error: " << last_error;
@@ -242,6 +566,7 @@ void RenderExecutionStatus(LivePidViewer& viewer,
                            std::size_t to_index,
                            const PlanResult& plan,
                            int accepted_attempt,
+                           int max_attempts,
                            double command_time,
                            double trajectory_duration,
                            int step) {
@@ -254,8 +579,8 @@ void RenderExecutionStatus(LivePidViewer& viewer,
        << "Path: " << plan.path_kind << "\n"
        << "Spline fit: " << (plan.used_c2_spline ? "success" : "failed; using linear fallback")
        << "\n"
-       << "Plan source: " << (plan.solve_attempts == 0 ? "cached path" : "fresh solve") << "\n"
-       << "Accepted attempt: " << accepted_attempt << "/" << kMaxLoopPlanningAttempts << "\n"
+       << "Plan source: " << plan.plan_source << "\n"
+       << "Accepted attempt: " << accepted_attempt << "/" << max_attempts << "\n"
        << "Planning time: " << std::setprecision(1) << plan.planning_wall_ms << " ms\n"
        << "OMPL solve attempts: " << plan.solve_attempts << "\n"
        << "Spline repair iterations: " << plan.spline_repair_iterations << "\n"
@@ -269,7 +594,8 @@ void RenderPlanAcceptedStatus(LivePidViewer& viewer,
                               std::size_t from_index,
                               std::size_t to_index,
                               const PlanResult& plan,
-                              int accepted_attempt) {
+                              int accepted_attempt,
+                              int max_attempts) {
   std::ostringstream left;
   left << demo_title << "\n"
        << "Successfully planned geometric path\n"
@@ -281,8 +607,8 @@ void RenderPlanAcceptedStatus(LivePidViewer& viewer,
          << "Using fallback: " << plan.path_kind << "\n";
   }
   left << "Segment " << from_index + 1 << " -> " << to_index + 1 << "\n"
-       << "Plan source: " << (plan.solve_attempts == 0 ? "cached path" : "fresh solve") << "\n"
-       << "Accepted attempt: " << accepted_attempt << "/" << kMaxLoopPlanningAttempts << "\n"
+       << "Plan source: " << plan.plan_source << "\n"
+       << "Accepted attempt: " << accepted_attempt << "/" << max_attempts << "\n"
        << "Planning time: " << std::fixed << std::setprecision(1) << plan.planning_wall_ms << " ms";
 
   constexpr const char* right = "C: mesh/collision\nMouse: rotate/pan/zoom\nEsc: stop";
@@ -295,6 +621,7 @@ void ExecuteLoopPath(Ur5Scene& scene,
                      const JointArray& start_q,
                      const PlanResult& plan,
                      int accepted_attempt,
+                     int max_attempts,
                      std::size_t from_index,
                      std::size_t to_index,
                      bool live_realtime) {
@@ -338,6 +665,7 @@ void ExecuteLoopPath(Ur5Scene& scene,
                             to_index,
                             plan,
                             accepted_attempt,
+                            max_attempts,
                             command_time,
                             trajectory_duration,
                             step);
@@ -463,34 +791,75 @@ int RunGoalLoopDemo(int argc, char** argv, PlannerKind planner_kind, std::string
       }
       if (check_cache) {
         LoopPathCache path_cache;
+        std::optional<ReusableSpars2LoopPlanner> spars2_planner;
+        if (planner_kind == PlannerKind::kSpars2) {
+          spars2_planner.emplace(scene_path);
+        }
         SharedPlanningStatus first_status;
         SharedPlanningStatus second_status;
         const LoopTransitionKey cache_key{0, 1};
-        const LoopPlanningResult first = PlanWithRetries(
-            scene_path, goals[0], goals[1], first_status, planner_kind, &path_cache, cache_key);
-        const LoopPlanningResult second = PlanWithRetries(
-            scene_path, goals[0], goals[1], second_status, planner_kind, &path_cache, cache_key);
+        const LoopPlanningResult first =
+            PlanWithRetries(scene_path,
+                            goals[0],
+                            goals[1],
+                            first_status,
+                            planner_kind,
+                            planner_kind == PlannerKind::kRrtConnect ? &path_cache : nullptr,
+                            cache_key,
+                            spars2_planner ? &*spars2_planner : nullptr);
+        LoopPlanningResult second;
+        if (first.accepted_attempt != 0) {
+          second = PlanWithRetries(scene_path,
+                                   goals[0],
+                                   goals[1],
+                                   second_status,
+                                   planner_kind,
+                                   planner_kind == PlannerKind::kRrtConnect ? &path_cache : nullptr,
+                                   cache_key,
+                                   spars2_planner ? &*spars2_planner : nullptr);
+        }
         std::cout << "cache smoke first_used_cache=" << std::boolalpha << first.used_cache
                   << " second_used_cache=" << second.used_cache
-                  << " cached_entries=" << path_cache.size() << '\n';
+                  << " cached_entries=" << path_cache.size();
+        if (spars2_planner) {
+          std::cout << " spars2_roadmap_states=" << spars2_planner->RoadmapStateCount();
+        }
+        std::cout << '\n';
         if (planner_kind == PlannerKind::kRrtConnect &&
             (first.accepted_attempt == 0 || second.accepted_attempt == 0 || first.used_cache ||
              !second.used_cache || path_cache.size() != 1)) {
           return 1;
         }
-        if (planner_kind != PlannerKind::kRrtConnect && second.used_cache) {
+        if (planner_kind == PlannerKind::kSpars2 &&
+            (first.accepted_attempt == 0 || second.accepted_attempt == 0 || first.used_cache ||
+             second.used_cache || path_cache.size() != 0 || spars2_planner->RoadmapStateCount() == 0)) {
+          return 1;
+        }
+        if (planner_kind != PlannerKind::kRrtConnect && planner_kind != PlannerKind::kSpars2 &&
+            second.used_cache) {
           return 1;
         }
       }
       if (check_transitions) {
         std::array<int, kWindowSpecs.size()> transition_window_hits{};
         LoopPathCache path_cache;
+        std::optional<ReusableSpars2LoopPlanner> spars2_planner;
+        if (planner_kind == PlannerKind::kSpars2) {
+          spars2_planner.emplace(scene_path);
+        }
         for (std::size_t i = 0; i < goals.size(); ++i) {
           const std::size_t next = (i + 1) % goals.size();
           SharedPlanningStatus status;
           const LoopTransitionKey cache_key{i, next};
-          const LoopPlanningResult result = PlanWithRetries(
-              scene_path, goals[i], goals[next], status, planner_kind, &path_cache, cache_key);
+          const LoopPlanningResult result =
+              PlanWithRetries(scene_path,
+                              goals[i],
+                              goals[next],
+                              status,
+                              planner_kind,
+                              planner_kind == PlannerKind::kRrtConnect ? &path_cache : nullptr,
+                              cache_key,
+                              spars2_planner ? &*spars2_planner : nullptr);
           if (result.accepted_attempt == 0 || result.plan.path.empty()) {
             std::cerr << "transition " << i + 1 << " -> " << next + 1
                       << " failed: " << result.error << '\n';
@@ -523,6 +892,10 @@ int RunGoalLoopDemo(int argc, char** argv, PlannerKind planner_kind, std::string
     LivePidViewer viewer(scene, {}, true);
     viewer.RenderStatus(std::string(demo_title) + "\nStarting at goal 1", "Esc: stop");
     LoopPathCache path_cache;
+    std::optional<ReusableSpars2LoopPlanner> spars2_planner;
+    if (planner_kind == PlannerKind::kSpars2) {
+      spars2_planner.emplace(scene_path);
+    }
 
     while (viewer.active()) {
       const std::size_t next_index = (current_index + 1) % goals.size();
@@ -537,8 +910,9 @@ int RunGoalLoopDemo(int argc, char** argv, PlannerKind planner_kind, std::string
             goals[next_index],
             status,
             planner_kind,
-            &path_cache,
-            cache_key);
+            planner_kind == PlannerKind::kRrtConnect ? &path_cache : nullptr,
+            cache_key,
+            spars2_planner ? &*spars2_planner : nullptr);
       });
 
       while (future.wait_for(std::chrono::milliseconds(0)) != std::future_status::ready &&
@@ -555,21 +929,29 @@ int RunGoalLoopDemo(int argc, char** argv, PlannerKind planner_kind, std::string
 
       LoopPlanningResult planning = future.get();
       if (planning.accepted_attempt == 0 || planning.plan.path.empty()) {
-        std::cerr << "error: exhausted loop planning retries\n";
+        std::cerr << "error: loop planning failed\n";
         std::cerr << "start_index=" << current_index + 1
                   << " start_q=" << FormatJointArray(goals[current_index]) << '\n';
         std::cerr << "goal_index=" << next_index + 1
                   << " goal_q=" << FormatJointArray(goals[next_index]) << '\n';
         std::cerr << "last_error=" << planning.error << '\n';
-        viewer.RenderStatus(std::string(demo_title) +
-                                "\nRetry limit exhausted\nSee terminal for start/goal q",
-                            "Esc: close");
+        std::ostringstream left;
+        left << demo_title << "\n";
+        if (planner_kind == PlannerKind::kSpars2) {
+          left << "SPARS2 budget exhausted\n"
+               << "Segment " << current_index + 1 << " -> " << next_index + 1 << "\n"
+               << "Budget: " << std::fixed << std::setprecision(0) << planning.budget_seconds
+               << " s\n"
+               << "Roadmap states: " << planning.roadmap_states << "\n";
+        } else {
+          left << "Planning failed\n"
+               << "Segment " << current_index + 1 << " -> " << next_index + 1 << "\n";
+        }
+        left << "See terminal for start/goal q";
+        viewer.RenderStatus(left.str(), "Esc: close");
         while (viewer.active()) {
           std::this_thread::sleep_for(std::chrono::milliseconds(50));
-          viewer.RenderStatus(
-              std::string(demo_title) +
-                  "\nRetry limit exhausted\nSee terminal for start/goal q",
-              "Esc: close");
+          viewer.RenderStatus(left.str(), "Esc: close");
         }
         return 1;
       }
@@ -579,7 +961,8 @@ int RunGoalLoopDemo(int argc, char** argv, PlannerKind planner_kind, std::string
                                current_index,
                                next_index,
                                planning.plan,
-                               planning.accepted_attempt);
+                               planning.accepted_attempt,
+                               planning.max_attempts);
       std::this_thread::sleep_for(std::chrono::milliseconds(300));
 
       ExecuteLoopPath(scene,
@@ -588,6 +971,7 @@ int RunGoalLoopDemo(int argc, char** argv, PlannerKind planner_kind, std::string
                       goals[current_index],
                       planning.plan,
                       planning.accepted_attempt,
+                      planning.max_attempts,
                       current_index,
                       next_index,
                       live_realtime);

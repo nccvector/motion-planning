@@ -3,6 +3,6 @@
 int main(int argc, char** argv) {
   return RunGoalLoopDemo(argc,
                          argv,
-                         PlannerKind::kInformedRrtStar,
-                         "UR5e endless goal loop - Informed RRT*");
+                         PlannerKind::kSpars2,
+                         "UR5e endless goal loop - SPARS2");
 }
