@@ -20,6 +20,7 @@
 #include <fstream>
 #include <iomanip>
 #include <iostream>
+#include <limits>
 #include <memory>
 #include <optional>
 #include <sstream>
@@ -64,15 +65,30 @@ constexpr double kMinOmplSolveAttemptSeconds = 0.020;
 constexpr int kMaxC2RepairIterations = 8;
 constexpr std::size_t kMaxC2SplineKnots = 96;
 constexpr double kMinimumSplineAttemptBudgetSeconds = 0.080;
-constexpr double kNominalJointSpeedRadPerSecond = 1.20;
-constexpr double kMinimumExecutionDurationSeconds = 2.0;
-constexpr double kFinalHoldSeconds = 1.0;
+constexpr double kNominalJointSpeedRadPerSecond = 8.40;
+constexpr double kMinimumExecutionDurationSeconds = 1.0;
+constexpr double kFinalHoldSeconds = 0.5;
 constexpr int kExecutionTraceStride = 16;
 constexpr double kLiveRenderHz = 60.0;
 constexpr double kControlHz = 60.0;
 constexpr double kControlPeriodSeconds = 1.0 / kControlHz;
 
 using JointArray = std::array<double, kDof>;
+
+bool JointArrayFinite(const JointArray& q) {
+  for (const double value : q) {
+    if (!std::isfinite(value)) {
+      return false;
+    }
+  }
+  return true;
+}
+
+void RequireFiniteJointArray(const JointArray& q, std::string_view label) {
+  if (!JointArrayFinite(q)) {
+    throw std::runtime_error(std::string(label) + " contains NaN or Inf");
+  }
+}
 
 struct WindowSpec {
   const char* name;
@@ -255,6 +271,7 @@ class Ur5Scene {
   }
 
   void ResetTo(const JointArray& q) {
+    RequireFiniteJointArray(q, "Reset configuration");
     mj_resetData(model_.get(), data_.get());
     for (int i = 0; i < kDof; ++i) {
       data_->qpos[qpos_addr_[i]] = q[i];
@@ -285,6 +302,15 @@ class Ur5Scene {
     return qd;
   }
 
+  void CheckFiniteSimulationState() const {
+    for (int i = 0; i < kDof; ++i) {
+      if (!std::isfinite(data_->qpos[qpos_addr_[i]]) ||
+          !std::isfinite(data_->qvel[qvel_addr_[i]])) {
+        throw std::runtime_error("MuJoCo simulation produced NaN or Inf joint state");
+      }
+    }
+  }
+
   std::array<double, 3> ToolPosition() const {
     const double* p = data_->site_xpos + 3 * tool_site_id_;
     return {p[0], p[1], p[2]};
@@ -309,6 +335,10 @@ class Ur5Scene {
 
   std::vector<std::string> ObstacleContactPairs(const JointArray& q) {
     SetConfiguration(q);
+    return CurrentObstacleContactPairs();
+  }
+
+  std::vector<std::string> CurrentObstacleContactPairs() const {
     std::vector<std::string> pairs;
     for (int i = 0; i < data_->ncon; ++i) {
       const mjContact& contact = data_->contact[i];
@@ -375,6 +405,7 @@ class Ur5Scene {
   void SetSimulationTimestep(double timestep) { model_->opt.timestep = timestep; }
 
   void SetConfigurationOnData(const JointArray& q, mjData* data) const {
+    RequireFiniteJointArray(q, "Configuration");
     mj_resetData(model_.get(), data);
     for (int i = 0; i < kDof; ++i) {
       data->qpos[qpos_addr_[i]] = q[i];
@@ -386,6 +417,7 @@ class Ur5Scene {
   const std::vector<int>& robot_collision_geoms() const { return robot_collision_geoms_; }
 
   void ApplyPidStep(const JointArray& target, JointArray& integral) {
+    RequireFiniteJointArray(target, "Controller target");
     const double dt = model_->opt.timestep;
 
     if (actuator_mode_ == ActuatorMode::kPosition) {
@@ -407,6 +439,7 @@ class Ur5Scene {
     }
 
     mj_step(model_.get(), data_.get());
+    CheckFiniteSimulationState();
   }
 
  private:
@@ -450,6 +483,9 @@ class Ur5Scene {
   }
 
   double ClipControl(int joint_index, double value) const {
+    if (!std::isfinite(value)) {
+      throw std::runtime_error("Controller command contains NaN or Inf");
+    }
     const int actuator_id = actuator_ids_[joint_index];
     const double lo = model_->actuator_ctrlrange[2 * actuator_id];
     const double hi = model_->actuator_ctrlrange[2 * actuator_id + 1];
@@ -745,6 +781,9 @@ class GoalBiasedStateSampler final : public ob::StateSampler {
 };
 
 double MaxAbsJointError(const JointArray& a, const JointArray& b) {
+  if (!JointArrayFinite(a) || !JointArrayFinite(b)) {
+    return std::numeric_limits<double>::infinity();
+  }
   double error = 0.0;
   for (int i = 0; i < kDof; ++i) {
     error = std::max(error, std::abs(a[i] - b[i]));
@@ -753,6 +792,9 @@ double MaxAbsJointError(const JointArray& a, const JointArray& b) {
 }
 
 double JointDistance(const JointArray& a, const JointArray& b) {
+  if (!JointArrayFinite(a) || !JointArrayFinite(b)) {
+    return std::numeric_limits<double>::infinity();
+  }
   double sum = 0.0;
   for (int i = 0; i < kDof; ++i) {
     const double delta = b[i] - a[i];
@@ -770,9 +812,29 @@ JointArray BlendJoints(const JointArray& a, const JointArray& b, double t) {
 }
 
 double MaxJointDelta(const JointArray& a, const JointArray& b) {
+  if (!JointArrayFinite(a) || !JointArrayFinite(b)) {
+    return std::numeric_limits<double>::infinity();
+  }
   double result = 0.0;
   for (int i = 0; i < kDof; ++i) {
     result = std::max(result, std::abs(b[i] - a[i]));
+  }
+  return result;
+}
+
+std::vector<JointArray> RemoveConsecutiveDuplicateKnots(
+    const std::vector<JointArray>& knots,
+    double tolerance = 1.0e-12) {
+  std::vector<JointArray> result;
+  result.reserve(knots.size());
+  for (const JointArray& q : knots) {
+    RequireFiniteJointArray(q, "Path knot");
+    if (result.empty() || MaxJointDelta(result.back(), q) > tolerance) {
+      result.push_back(q);
+    }
+  }
+  if (result.size() < 2) {
+    throw std::runtime_error("Need at least two distinct knots for path sampling");
   }
   return result;
 }
@@ -834,7 +896,9 @@ std::vector<JointArray> PathStatesToJoints(const og::PathGeometric& path) {
   std::vector<JointArray> result;
   result.reserve(path.getStateCount());
   for (std::size_t i = 0; i < path.getStateCount(); ++i) {
-    result.push_back(StateToJoints(path.getState(i)));
+    JointArray q = StateToJoints(path.getState(i));
+    RequireFiniteJointArray(q, "OMPL path state");
+    result.push_back(q);
   }
   return result;
 }
@@ -846,6 +910,7 @@ og::PathGeometric JointsToPathGeometric(const ob::SpaceInformationPtr& space_inf
   }
   og::PathGeometric path(space_information);
   for (const JointArray& q : knots) {
+    RequireFiniteJointArray(q, "Reusable path knot");
     ob::ScopedState<> state(space_information->getStateSpace());
     FillState(q, state);
     path.append(state.get());
@@ -960,16 +1025,14 @@ JointArray EvaluateLinearPath(const std::vector<JointArray>& knots,
 
 std::vector<JointArray> SampleLinearPath(const std::vector<JointArray>& knots,
                                          std::size_t sample_count) {
-  if (knots.size() < 2) {
-    throw std::runtime_error("Need at least two knots for linear path sampling");
-  }
-  const std::vector<double> parameters = ChordLengthParameters(knots);
+  const std::vector<JointArray> distinct_knots = RemoveConsecutiveDuplicateKnots(knots);
+  const std::vector<double> parameters = ChordLengthParameters(distinct_knots);
   std::vector<JointArray> result;
   result.reserve(sample_count);
   for (std::size_t sample = 0; sample < sample_count; ++sample) {
     const double alpha = static_cast<double>(sample) / static_cast<double>(sample_count - 1);
     const double s = parameters.back() * alpha;
-    result.push_back(EvaluateLinearPath(knots, parameters, s));
+    result.push_back(EvaluateLinearPath(distinct_knots, parameters, s));
   }
   return result;
 }
@@ -1301,7 +1364,8 @@ std::shared_ptr<ob::RealVectorStateSpace> MakePlanningStateSpace(
     bounds.setHigh(i, hi);
   }
   space->setBounds(bounds);
-  space->setLongestValidSegmentFraction(0.001);
+  // space->setLongestValidSegmentFraction(0.001);
+  space->setLongestValidSegmentFraction(0.0174533);  // 1 degree
   if (use_goal_biased_sampler) {
     space->setStateSamplerAllocator([goal_q](const ob::StateSpace* sampler_space) {
       return std::make_shared<GoalBiasedStateSampler>(sampler_space, goal_q, kGoalSampleBias);
