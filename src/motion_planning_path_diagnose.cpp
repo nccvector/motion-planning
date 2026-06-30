@@ -279,7 +279,7 @@ void AnalyzeSample(mjModel* model,
 int main(int argc, char** argv) {
   const std::filesystem::path scene_path =
       argc > 1 ? std::filesystem::path(argv[1])
-               : std::filesystem::path(UR5_MUJOCO_OMPL_DEFAULT_SCENE);
+               : std::filesystem::path(MOTION_PLANNING_DEFAULT_SCENE);
   const std::filesystem::path path_file =
       argc > 2 ? std::filesystem::path(argv[2]) : std::filesystem::path("planned_path.csv");
   const int substeps_per_segment = argc > 3 ? std::max(1, std::stoi(argv[3])) : 16;

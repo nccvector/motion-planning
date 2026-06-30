@@ -237,7 +237,7 @@ int main(int argc, char** argv) {
   const int arg_offset = check_only ? 1 : 0;
   const std::filesystem::path scene_path =
       argc > 1 + arg_offset ? std::filesystem::path(argv[1 + arg_offset])
-               : std::filesystem::path(UR5_MUJOCO_OMPL_DEFAULT_SCENE);
+               : std::filesystem::path(MOTION_PLANNING_DEFAULT_SCENE);
   const std::filesystem::path path_file =
       argc > 2 + arg_offset ? std::filesystem::path(argv[2 + arg_offset])
                             : std::filesystem::path("planned_path.csv");

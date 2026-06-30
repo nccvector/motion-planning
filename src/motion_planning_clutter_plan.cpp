@@ -30,7 +30,7 @@ int main(int argc, char** argv) {
   }
 
   const std::filesystem::path scene_path =
-      scene_arg.value_or(std::filesystem::path(UR5_MUJOCO_OMPL_DEFAULT_SCENE));
+      scene_arg.value_or(std::filesystem::path(MOTION_PLANNING_DEFAULT_SCENE));
 
   try {
     Ur5Scene scene(scene_path);

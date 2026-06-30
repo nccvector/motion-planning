@@ -1,4 +1,4 @@
-#include "ur5_goal_loop_demo.hpp"
+#include "motion_planning_goal_loop_demo.hpp"
 
 int main(int argc, char** argv) {
   return RunGoalLoopDemo(argc,

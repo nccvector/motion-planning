@@ -1,4 +1,4 @@
-# ur5-mujoco-ompl
+# motion-planning
 
 Local C++ lab for planning and executing UR5e manipulator motion in a cluttered
 MuJoCo scene with OMPL.
@@ -13,7 +13,7 @@ This project is intentionally separate from `projects/ros2-learning`.
 - OMPL from CMake `FetchContent`.
 - Eigen and the required Boost components from CMake `FetchContent`, because
   OMPL needs them.
-- A C++23 executable, `ur5_clutter_plan`, that:
+- A C++23 executable, `motion_planning_clutter_plan`, that:
   - loads an official Menagerie UR5e scene wrapped with local shelf and tight
     red-ring window clutter,
   - checks home and goal validity,
@@ -27,11 +27,11 @@ This project is intentionally separate from `projects/ros2-learning`.
     out of budget,
   - executes the sampled path with Menagerie position actuators,
   - writes `planned_path.csv` and `executed_trace.csv`.
-- A C++23 executable, `ur5_path_replay`, that:
+- A C++23 executable, `motion_planning_path_replay`, that:
   - loads the same MuJoCo scene,
   - replays `planned_path.csv` or `executed_trace.csv`,
   - shows the tool path and current tool position in a native MuJoCo/GLFW window.
-- A C++23 executable, `ur5_goal_loop_demo`, that:
+- A C++23 executable, `motion_planning_goal_loop_demo`, that:
   - cycles through 24 valid joint-space entries,
   - returns to one robust red-ring staging pose between 12 Monte Carlo-selected
     shelf-side gap goals cycling through three spaces between four shelf-entry
@@ -42,19 +42,19 @@ This project is intentionally separate from `projects/ros2-learning`.
   - shows the current target posture as a translucent green robot ghost,
   - executes each accepted segment with the same PID controller without writing
     long-running CSV traces.
-- A C++23 executable, `ur5_goal_monte_carlo`, that:
+- A C++23 executable, `motion_planning_goal_monte_carlo`, that:
   - runs deterministic Monte Carlo exploration of valid states in the current
     scene,
   - ranks primary-ring approach-side goals and shelf-gap finish-line goals,
   - prints a C++ initializer for an alternating 24-goal loop list.
-- A C++23 executable, `ur5_path_diagnose`, that:
+- A C++23 executable, `motion_planning_path_diagnose`, that:
   - checks robot collision geometry against the red ring along a saved CSV path,
   - samples between adjacent CSV rows to catch interpolation/grazing issues.
 
 ## Build
 
 ```bash
-cd /Users/faizanali/Documents/robotics/projects/ur5-mujoco-ompl
+cd /Users/faizanali/Documents/robotics/projects/motion-planning
 cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
 cmake --build build -j
 ```
@@ -62,7 +62,7 @@ cmake --build build -j
 ## Run
 
 ```bash
-./build/ur5_clutter_plan
+./build/motion_planning_clutter_plan
 ```
 
 This plans the path, opens a live MuJoCo window for the PID execution preview,
@@ -75,26 +75,26 @@ mode.
 Optional scene argument:
 
 ```bash
-./build/ur5_clutter_plan /path/to/scene.xml
+./build/motion_planning_clutter_plan /path/to/scene.xml
 ```
 
 Non-interactive run without the live PID window:
 
 ```bash
-./build/ur5_clutter_plan --no-live
+./build/motion_planning_clutter_plan --no-live
 ```
 
 The default live viewer is paced to MuJoCo simulation time. For a fast preview
 that does not sleep to realtime:
 
 ```bash
-./build/ur5_clutter_plan --live-fast
+./build/motion_planning_clutter_plan --live-fast
 ```
 
 Endless goal-loop demo:
 
 ```bash
-./build/ur5_goal_loop_demo
+./build/motion_planning_goal_loop_demo
 ```
 
 This opens the viewer immediately at the first loop goal, plans to the next
@@ -110,14 +110,14 @@ start/goal joint vectors for reproducing that pair in a smaller experiment.
 Goal-list checks:
 
 ```bash
-./build/ur5_goal_loop_demo --check-goals
-./build/ur5_goal_loop_demo --check-transitions
+./build/motion_planning_goal_loop_demo --check-goals
+./build/motion_planning_goal_loop_demo --check-transitions
 ```
 
 Regenerate Monte Carlo candidates:
 
 ```bash
-./build/ur5_goal_monte_carlo
+./build/motion_planning_goal_monte_carlo
 ```
 
 The current scene uses a tightened primary red ring plus four vertical red
@@ -156,33 +156,33 @@ live window:
 For later replay from CSV, first generate a path:
 
 ```bash
-./build/ur5_clutter_plan --no-live
+./build/motion_planning_clutter_plan --no-live
 ```
 
 Then replay it:
 
 ```bash
-./build/ur5_path_replay
+./build/motion_planning_path_replay
 ```
 
 Optional explicit scene and CSV arguments:
 
 ```bash
-./build/ur5_path_replay build/scenes/ur5e_clutter.xml planned_path.csv
-./build/ur5_path_replay build/scenes/ur5e_clutter.xml executed_trace.csv
+./build/motion_planning_path_replay build/scenes/ur5e_clutter.xml planned_path.csv
+./build/motion_planning_path_replay build/scenes/ur5e_clutter.xml executed_trace.csv
 ```
 
 Non-interactive loader check:
 
 ```bash
-./build/ur5_path_replay --check build/scenes/ur5e_clutter.xml planned_path.csv
+./build/motion_planning_path_replay --check build/scenes/ur5e_clutter.xml planned_path.csv
 ```
 
 Collision diagnostic:
 
 ```bash
-./build/ur5_path_diagnose build/scenes/ur5e_clutter.xml planned_path.csv 128
-./build/ur5_path_diagnose build/scenes/ur5e_clutter.xml executed_trace.csv 4
+./build/motion_planning_path_diagnose build/scenes/ur5e_clutter.xml planned_path.csv 128
+./build/motion_planning_path_diagnose build/scenes/ur5e_clutter.xml executed_trace.csv 4
 ```
 
 Viewer controls:

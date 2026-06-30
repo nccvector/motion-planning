@@ -138,7 +138,7 @@ void PrintCppInitializer(const std::vector<Candidate>& needle_side,
                          const std::array<std::vector<Candidate>, kShelfWindowCount>& shelf_windows) {
   std::cout << "\nC++ alternating loop-goal initializer:\n";
   std::cout << "std::vector<JointArray> BuildLoopGoals() {\n";
-  std::cout << "  // Alternating Monte Carlo goals from `ur5_goal_monte_carlo`: approach-side\n";
+  std::cout << "  // Alternating Monte Carlo goals from `motion_planning_goal_monte_carlo`: approach-side\n";
   std::cout << "  // states near the primary red-ring opening, then shelf-side states that\n";
   std::cout << "  // cross the logical finish lines behind the three pole gaps.\n";
   std::cout << "  return {\n";
@@ -203,7 +203,7 @@ int main(int argc, char** argv) {
 
   try {
     const std::filesystem::path scene_path =
-        scene_arg.value_or(std::filesystem::path(UR5_MUJOCO_OMPL_DEFAULT_SCENE));
+        scene_arg.value_or(std::filesystem::path(MOTION_PLANNING_DEFAULT_SCENE));
     Ur5Scene scene(scene_path);
 
     std::array<std::uniform_real_distribution<double>, kDof> joint_distributions;

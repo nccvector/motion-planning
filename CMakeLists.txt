@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.28)
 
-project(ur5_mujoco_ompl
+project(motion_planning
   VERSION 0.1.0
   DESCRIPTION "Local MuJoCo + OMPL motion planning lab for a UR5e manipulator"
   LANGUAGES CXX
@@ -110,27 +110,27 @@ else()
   message(FATAL_ERROR "Could not find OMPL CMake target")
 endif()
 
-add_executable(ur5_clutter_plan
-  src/ur5_clutter_plan.cpp
+add_executable(motion_planning_clutter_plan
+  src/motion_planning_clutter_plan.cpp
   src/ur5_clutter_core.hpp
   src/ur5_visualization.hpp
 )
-target_compile_features(ur5_clutter_plan PRIVATE cxx_std_23)
-target_link_libraries(ur5_clutter_plan
+target_compile_features(motion_planning_clutter_plan PRIVATE cxx_std_23)
+target_link_libraries(motion_planning_clutter_plan
   PRIVATE
     ${UR5_MUJOCO_TARGET}
     ${UR5_OMPL_TARGET}
     glfw
 )
-target_compile_definitions(ur5_clutter_plan
+target_compile_definitions(motion_planning_clutter_plan
   PRIVATE
-    UR5_MUJOCO_OMPL_DEFAULT_SCENE="${CMAKE_CURRENT_BINARY_DIR}/scenes/ur5e_clutter.xml"
+    MOTION_PLANNING_DEFAULT_SCENE="${CMAKE_CURRENT_BINARY_DIR}/scenes/ur5e_clutter.xml"
 )
 
-function(add_ur5_goal_loop_demo target source)
+function(add_motion_planning_goal_loop_demo target source)
   add_executable(${target}
     ${source}
-    src/ur5_goal_loop_demo.hpp
+    src/motion_planning_goal_loop_demo.hpp
     src/ur5_clutter_core.hpp
     src/ur5_visualization.hpp
   )
@@ -143,74 +143,74 @@ function(add_ur5_goal_loop_demo target source)
   )
   target_compile_definitions(${target}
     PRIVATE
-      UR5_MUJOCO_OMPL_DEFAULT_SCENE="${CMAKE_CURRENT_BINARY_DIR}/scenes/ur5e_clutter.xml"
+      MOTION_PLANNING_DEFAULT_SCENE="${CMAKE_CURRENT_BINARY_DIR}/scenes/ur5e_clutter.xml"
   )
 endfunction()
 
-add_ur5_goal_loop_demo(ur5_goal_loop_demo src/ur5_goal_loop_demo.cpp)
-add_ur5_goal_loop_demo(
-  ur5_goal_loop_rrtconnect_experience_roadmap_demo
-  src/ur5_goal_loop_rrtconnect_experience_roadmap_demo.cpp
+add_motion_planning_goal_loop_demo(motion_planning_goal_loop_demo src/motion_planning_goal_loop_demo.cpp)
+add_motion_planning_goal_loop_demo(
+  motion_planning_rrtconnect_experience_roadmap_demo
+  src/motion_planning_rrtconnect_experience_roadmap_demo.cpp
 )
 
-add_executable(ur5_goal_monte_carlo
-  src/ur5_goal_monte_carlo.cpp
+add_executable(motion_planning_goal_monte_carlo
+  src/motion_planning_goal_monte_carlo.cpp
   src/ur5_clutter_core.hpp
   src/ur5_visualization.hpp
 )
-target_compile_features(ur5_goal_monte_carlo PRIVATE cxx_std_23)
-target_link_libraries(ur5_goal_monte_carlo
+target_compile_features(motion_planning_goal_monte_carlo PRIVATE cxx_std_23)
+target_link_libraries(motion_planning_goal_monte_carlo
   PRIVATE
     ${UR5_MUJOCO_TARGET}
     ${UR5_OMPL_TARGET}
     glfw
 )
-target_compile_definitions(ur5_goal_monte_carlo
+target_compile_definitions(motion_planning_goal_monte_carlo
   PRIVATE
-    UR5_MUJOCO_OMPL_DEFAULT_SCENE="${CMAKE_CURRENT_BINARY_DIR}/scenes/ur5e_clutter.xml"
+    MOTION_PLANNING_DEFAULT_SCENE="${CMAKE_CURRENT_BINARY_DIR}/scenes/ur5e_clutter.xml"
 )
 
-add_executable(ur5_path_replay
-  src/ur5_path_replay.cpp
+add_executable(motion_planning_path_replay
+  src/motion_planning_path_replay.cpp
   src/ur5_visualization.hpp
 )
-target_compile_features(ur5_path_replay PRIVATE cxx_std_23)
-target_link_libraries(ur5_path_replay
+target_compile_features(motion_planning_path_replay PRIVATE cxx_std_23)
+target_link_libraries(motion_planning_path_replay
   PRIVATE
     ${UR5_MUJOCO_TARGET}
     glfw
 )
-target_compile_definitions(ur5_path_replay
+target_compile_definitions(motion_planning_path_replay
   PRIVATE
-    UR5_MUJOCO_OMPL_DEFAULT_SCENE="${CMAKE_CURRENT_BINARY_DIR}/scenes/ur5e_clutter.xml"
+    MOTION_PLANNING_DEFAULT_SCENE="${CMAKE_CURRENT_BINARY_DIR}/scenes/ur5e_clutter.xml"
 )
 
-add_executable(ur5_path_diagnose
-  src/ur5_path_diagnose.cpp
+add_executable(motion_planning_path_diagnose
+  src/motion_planning_path_diagnose.cpp
 )
-target_compile_features(ur5_path_diagnose PRIVATE cxx_std_23)
-target_link_libraries(ur5_path_diagnose
+target_compile_features(motion_planning_path_diagnose PRIVATE cxx_std_23)
+target_link_libraries(motion_planning_path_diagnose
   PRIVATE
     ${UR5_MUJOCO_TARGET}
 )
-target_compile_definitions(ur5_path_diagnose
+target_compile_definitions(motion_planning_path_diagnose
   PRIVATE
-    UR5_MUJOCO_OMPL_DEFAULT_SCENE="${CMAKE_CURRENT_BINARY_DIR}/scenes/ur5e_clutter.xml"
+    MOTION_PLANNING_DEFAULT_SCENE="${CMAKE_CURRENT_BINARY_DIR}/scenes/ur5e_clutter.xml"
 )
 
 if(MSVC)
-  target_compile_options(ur5_clutter_plan PRIVATE /W4)
-  target_compile_options(ur5_goal_loop_demo PRIVATE /W4)
-  target_compile_options(ur5_goal_loop_rrtconnect_experience_roadmap_demo PRIVATE /W4)
-  target_compile_options(ur5_goal_monte_carlo PRIVATE /W4)
-  target_compile_options(ur5_path_replay PRIVATE /W4)
-  target_compile_options(ur5_path_diagnose PRIVATE /W4)
+  target_compile_options(motion_planning_clutter_plan PRIVATE /W4)
+  target_compile_options(motion_planning_goal_loop_demo PRIVATE /W4)
+  target_compile_options(motion_planning_rrtconnect_experience_roadmap_demo PRIVATE /W4)
+  target_compile_options(motion_planning_goal_monte_carlo PRIVATE /W4)
+  target_compile_options(motion_planning_path_replay PRIVATE /W4)
+  target_compile_options(motion_planning_path_diagnose PRIVATE /W4)
 else()
-  target_compile_options(ur5_clutter_plan PRIVATE -Wall -Wextra -Wpedantic)
-  target_compile_options(ur5_goal_loop_demo PRIVATE -Wall -Wextra -Wpedantic -Wno-unused-function)
-  target_compile_options(ur5_goal_loop_rrtconnect_experience_roadmap_demo PRIVATE
+  target_compile_options(motion_planning_clutter_plan PRIVATE -Wall -Wextra -Wpedantic)
+  target_compile_options(motion_planning_goal_loop_demo PRIVATE -Wall -Wextra -Wpedantic -Wno-unused-function)
+  target_compile_options(motion_planning_rrtconnect_experience_roadmap_demo PRIVATE
     -Wall -Wextra -Wpedantic -Wno-unused-function)
-  target_compile_options(ur5_goal_monte_carlo PRIVATE -Wall -Wextra -Wpedantic -Wno-unused-function)
-  target_compile_options(ur5_path_replay PRIVATE -Wall -Wextra -Wpedantic)
-  target_compile_options(ur5_path_diagnose PRIVATE -Wall -Wextra -Wpedantic)
+  target_compile_options(motion_planning_goal_monte_carlo PRIVATE -Wall -Wextra -Wpedantic -Wno-unused-function)
+  target_compile_options(motion_planning_path_replay PRIVATE -Wall -Wextra -Wpedantic)
+  target_compile_options(motion_planning_path_diagnose PRIVATE -Wall -Wextra -Wpedantic)
 endif()
